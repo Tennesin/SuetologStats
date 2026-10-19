@@ -1,0 +1,599 @@
+"""Построение отчётов (xlsx и txt) из ScanResult. С Discord напрямую не работает."""
+
+import io
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+
+import xlsxwriter
+
+from config import (
+    DATE_FMT, MAX_LIST_ROWS, MAX_MATRIX_COLS, NAME_WIDTH, SORT_LABELS, TZ, TZ_NAME,
+    clean, fit_name, fmt_list, fmt_num,
+)
+from scanner import ScanParams, ScanResult, ScanState, chan_label
+
+TOP_CHANNELS = 15
+TOP_USERS = 10
+TABLE_USERS = 15
+MATRIX_USERS = 30
+COMPARE_ROWS = 500
+WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+MODE_TITLES = {
+    "days": "по дням",
+    "weeks": "по неделям (в шапке — понедельник недели)",
+    "months": "по месяцам",
+}
+
+
+# ---------- Агрегация ----------
+
+@dataclass
+class Agg:
+    order: list
+    totals: dict
+    per_user: dict
+    names: dict
+
+    def name_of(self, uid: int) -> str:
+        return self.names.get(uid, str(uid))
+
+
+def aggregate(params: ScanParams, result: ScanResult) -> Agg:
+    per_user: dict[int, dict[date, int]] = defaultdict(dict)
+    totals: dict[int, int] = defaultdict(int)
+    for (uid, day), n in result.user_day.items():
+        per_user[uid][day] = n
+        totals[uid] += n
+    names = result.names
+
+    def nm(uid):
+        return names.get(uid, str(uid)).casefold()
+
+    if params.sort_key == "name":
+        order = sorted(totals, key=lambda u: (nm(u), u))
+    else:
+        order = sorted(totals, key=lambda u: (-totals[u], nm(u), u))
+    return Agg(order, totals, per_user, names)
+
+
+def period_text(params: ScanParams) -> str:
+    s = params.start_date.strftime(DATE_FMT) if params.start_date else "с начала истории"
+    e = params.end_date.strftime(DATE_FMT) if params.end_date else "по сегодня"
+    if params.period_label:
+        return f"{params.period_label} ({s} — {e})"
+    return f"{s} — {e}"
+
+
+def prev_period_text(params: ScanParams) -> str:
+    pr = params.prev_range
+    return f"{pr[0].strftime(DATE_FMT)} — {pr[1].strftime(DATE_FMT)}" if pr else ""
+
+
+# ---------- Детализация матрицы ----------
+
+def bucket_of(day: date, mode: str) -> date:
+    if mode == "weeks":
+        return day - timedelta(days=day.weekday())
+    if mode == "months":
+        return day.replace(day=1)
+    return day
+
+
+def next_bucket(b: date, mode: str) -> date:
+    if mode == "days":
+        return b + timedelta(days=1)
+    if mode == "weeks":
+        return b + timedelta(days=7)
+    return (b.replace(day=28) + timedelta(days=4)).replace(day=1)
+
+
+def make_buckets(first: date, last: date, mode: str) -> list[date]:
+    out, b, end = [], bucket_of(first, mode), bucket_of(last, mode)
+    while b <= end:
+        out.append(b)
+        b = next_bucket(b, mode)
+    return out
+
+
+def pick_detail(requested: str, first: date, last: date):
+    span = (last - first).days + 1
+    if requested in ("days", "weeks", "months"):
+        mode, reason = requested, "задано вручную"
+    else:
+        mode = "days" if span <= 90 else "weeks" if span <= 730 else "months"
+        reason = f"выбрано автоматически (период {span} дн.)"
+    buckets = make_buckets(first, last, mode)
+    while len(buckets) > MAX_MATRIX_COLS and mode != "months":
+        mode = "weeks" if mode == "days" else "months"
+        reason = f"укрупнено, чтобы матрица не вышла за {MAX_MATRIX_COLS} столбцов"
+        buckets = make_buckets(first, last, mode)
+    return mode, buckets, reason
+
+
+# ---------- Excel ----------
+
+def make_formats(wb):
+    border = {"border": 1, "border_color": "#D9D9D9", "valign": "vcenter"}
+    return {
+        "head": wb.add_format({"bold": True, "bg_color": "#1F4E78", "font_color": "#FFFFFF",
+                               "border": 1, "align": "center", "valign": "vcenter", "text_wrap": True}),
+        "text": wb.add_format({**border}),
+        "int": wb.add_format({**border, "num_format": "#,##0"}),
+        "dec": wb.add_format({**border, "num_format": "0.00"}),
+        "pct": wb.add_format({**border, "num_format": "0.0%"}),
+        "delta": wb.add_format({**border, "num_format": "+#,##0;-#,##0;0"}),
+        "delta_pct": wb.add_format({**border, "num_format": "+0.0%;-0.0%;0.0%"}),
+        "date": wb.add_format({**border, "num_format": "dd.mm.yyyy", "align": "center"}),
+        "cell": wb.add_format({**border, "align": "center"}),
+        "tot_text": wb.add_format({"bold": True, "bg_color": "#F2F2F2", "border": 1, "valign": "vcenter"}),
+        "tot_int": wb.add_format({"bold": True, "bg_color": "#F2F2F2", "border": 1,
+                                  "num_format": "#,##0", "valign": "vcenter"}),
+        "tot_cell": wb.add_format({"bold": True, "bg_color": "#F2F2F2", "border": 1,
+                                   "align": "center", "valign": "vcenter"}),
+        "banner": wb.add_format({"bold": True, "bg_color": "#FFC7CE", "font_color": "#9C0006",
+                                 "valign": "vcenter"}),
+        "bold": wb.add_format({"bold": True}),
+        "section": wb.add_format({"bold": True, "bg_color": "#DDEBF7"}),
+        "note": wb.add_format({"italic": True, "font_color": "#666666"}),
+        "wrap": wb.add_format({"text_wrap": True, "valign": "top"}),
+    }
+
+
+def sheet_summary(wb, F, agg: Agg, params, state, name_w):
+    order, totals, per_user = agg.order, agg.totals, agg.per_user
+    grand_total = sum(totals.values())
+    ws = wb.add_worksheet("Сводка")
+    top = 0
+    if state.cancelled:
+        ws.merge_range(0, 0, 0, 8, "⚠ Сбор остановлен вручную: данные НЕПОЛНЫЕ.", F["banner"])
+        top = 1
+    headers = ["№", "Пользователь", "ID", "Сообщений", "Дней с сообщениями",
+               "Среднее в активный день", "Первая дата", "Последняя дата", "Доля от всех"]
+    for c, h in enumerate(headers):
+        ws.write_string(top, c, h, F["head"])
+    ws.set_row(top, 32)
+    ws.set_column(0, 0, 6)
+    ws.set_column(1, 1, name_w)
+    ws.set_column(2, 2, 21)
+    ws.set_column(3, 5, 14)
+    ws.set_column(6, 7, 14)
+    ws.set_column(8, 8, 12)
+
+    for i, uid in enumerate(order, start=1):
+        r = top + i
+        days = per_user[uid]
+        n = totals[uid]
+        ws.write_number(r, 0, i, F["int"])
+        ws.write_string(r, 1, clean(agg.name_of(uid)), F["text"])
+        ws.write_string(r, 2, str(uid), F["text"])
+        ws.write_number(r, 3, n, F["int"])
+        ws.write_number(r, 4, len(days), F["int"])
+        ws.write_number(r, 5, n / len(days), F["dec"])
+        ws.write_datetime(r, 6, min(days), F["date"])
+        ws.write_datetime(r, 7, max(days), F["date"])
+        ws.write_number(r, 8, n / grand_total if grand_total else 0, F["pct"])
+    if order:
+        last_row = top + len(order)
+        ws.autofilter(top, 0, last_row, len(headers) - 1)
+        tr = last_row + 2
+        ws.write_string(tr, 1, "ВСЕГО", F["tot_text"])
+        ws.write_number(tr, 3, grand_total, F["tot_int"])
+        ws.write_string(tr, 2, f"пользователей: {len(order)}", F["tot_text"])
+    else:
+        ws.write_string(top + 1, 1, "Сообщений за выбранный период не найдено.")
+    ws.freeze_panes(top + 1, 2)
+
+
+def sheet_matrix(wb, F, agg: Agg, params, name_w) -> str:
+    order, totals, per_user = agg.order, agg.totals, agg.per_user
+    grand_total = sum(totals.values())
+    wm = wb.add_worksheet("Матрица")
+    all_days = [d for u in order for d in per_user[u]]
+    if not all_days:
+        wm.write_string(0, 0, "Сообщений за выбранный период не найдено.")
+        return "матрица пуста"
+    mode, buckets, reason = pick_detail(params.detail, min(all_days), max(all_days))
+    col_of = {b: 2 + i for i, b in enumerate(buckets)}
+    head_fmt = wb.add_format({
+        "bold": True, "bg_color": "#1F4E78", "font_color": "#FFFFFF", "border": 1,
+        "align": "center", "valign": "vcenter", "rotation": 90,
+        "num_format": "mm.yyyy" if mode == "months" else "dd.mm.yy",
+    })
+    wm.set_row(0, 62)
+    wm.write_string(0, 0, "Пользователь", F["head"])
+    wm.write_string(0, 1, "Итого", F["head"])
+    for b in buckets:
+        wm.write_datetime(0, col_of[b], b, head_fmt)
+    wm.set_column(0, 0, name_w)
+    wm.set_column(1, 1, 10)
+    wm.set_column(2, 1 + len(buckets), 8 if mode == "months" else 5.5)
+
+    col_sums = defaultdict(int)
+    for i, uid in enumerate(order, start=1):
+        wm.write_string(i, 0, clean(agg.name_of(uid)), F["text"])
+        wm.write_number(i, 1, totals[uid], F["int"])
+        row_vals: dict[date, int] = defaultdict(int)
+        for day, n in per_user[uid].items():
+            row_vals[bucket_of(day, mode)] += n
+        for b, n in row_vals.items():
+            wm.write_number(i, col_of[b], n, F["cell"])
+            col_sums[b] += n
+    tr = len(order) + 1
+    wm.write_string(tr, 0, "ВСЕГО", F["tot_text"])
+    wm.write_number(tr, 1, grand_total, F["tot_int"])
+    for b in buckets:
+        if col_sums[b]:
+            wm.write_number(tr, col_of[b], col_sums[b], F["tot_cell"])
+        else:
+            wm.write_blank(tr, col_of[b], None, F["tot_cell"])
+    wm.conditional_format(1, 2, len(order), 1 + len(buckets), {
+        "type": "2_color_scale", "min_color": "#FFFFFF", "max_color": "#2E9E5B",
+    })
+    wm.freeze_panes(1, 2)
+    return f"{MODE_TITLES[mode]}; {reason}; столбцов: {len(buckets)}"
+
+
+def sheet_daily(wb, F, agg: Agg, name_w) -> bool:
+    wl = wb.add_worksheet("По дням (список)")
+    for c, h in enumerate(["Пользователь", "ID", "Дата", "Сообщений"]):
+        wl.write_string(0, c, h, F["head"])
+    wl.set_column(0, 0, name_w)
+    wl.set_column(1, 1, 21)
+    wl.set_column(2, 3, 13)
+    r = 0
+    truncated = False
+    for uid in agg.order:
+        nm = clean(agg.name_of(uid))
+        for day, n in sorted(agg.per_user[uid].items()):
+            if r >= MAX_LIST_ROWS:
+                truncated = True
+                break
+            r += 1
+            wl.write_string(r, 0, nm, F["text"])
+            wl.write_string(r, 1, str(uid), F["text"])
+            wl.write_datetime(r, 2, day, F["date"])
+            wl.write_number(r, 3, n, F["int"])
+        if truncated:
+            break
+    wl.autofilter(0, 0, max(r, 1), 3)
+    wl.freeze_panes(1, 0)
+    return truncated
+
+
+def sheet_analytics(wb, F, agg: Agg, result: ScanResult, params: ScanParams, name_w):
+    ws = wb.add_worksheet("Аналитика")
+    ws.set_column(0, 0, max(name_w, 38))
+    ws.set_column(1, 26, 11)
+    grand = sum(agg.totals.values())
+    if not grand:
+        ws.write_string(0, 0, "Сообщений за выбранный период не найдено.")
+        return
+
+    row = 0
+
+    def section(text, note=None):
+        nonlocal row
+        ws.merge_range(row, 0, row, 8, text, F["section"])
+        row += 1
+        if note:
+            ws.write_string(row, 0, note, F["note"])
+            row += 1
+
+    def lab(cid):
+        return clean(result.channel_names.get(cid, str(cid)))
+
+    chan_total: dict = defaultdict(int)
+    chan_auth: dict = defaultdict(set)
+    user_chan: dict = defaultdict(dict)
+    for (uid, cid), n in result.user_channel.items():
+        chan_total[cid] += n
+        chan_auth[cid].add(uid)
+        user_chan[uid][cid] = n
+    by_count = sorted(agg.totals, key=lambda u: (-agg.totals[u], agg.name_of(u).casefold()))
+
+    # 1. Топ каналов
+    section(f"1. Топ каналов (до {TOP_CHANNELS})")
+    for c, t in enumerate(["Канал", "Сообщений", "Доля", "Авторов"]):
+        ws.write_string(row, c, t, F["head"])
+    head_row = row
+    row += 1
+    first = row
+    top = sorted(chan_total, key=lambda c: (-chan_total[c], lab(c).casefold()))[:TOP_CHANNELS]
+    for cid in top:
+        ws.write_string(row, 0, lab(cid), F["text"])
+        ws.write_number(row, 1, chan_total[cid], F["int"])
+        ws.write_number(row, 2, chan_total[cid] / grand, F["pct"])
+        ws.write_number(row, 3, len(chan_auth[cid]), F["int"])
+        row += 1
+    if top:
+        chart = wb.add_chart({"type": "bar"})
+        chart.add_series({
+            "categories": ["Аналитика", first, 0, row - 1, 0],
+            "values": ["Аналитика", first, 1, row - 1, 1],
+            "fill": {"color": "#2E7BB8"}, "gap": 50,
+        })
+        chart.set_legend({"none": True})
+        chart.set_title({"name": "Топ каналов по сообщениям"})
+        chart.set_y_axis({"reverse": True})
+        chart.set_size({"width": 560, "height": 380})
+        ws.insert_chart(head_row, 5, chart)
+    row = max(row, head_row + 20) + 1
+
+    # 2. Кто где пишет
+    section(f"2. Кто где пишет (топ-{TOP_USERS} пользователей, по 3 главных канала)")
+    for uid in by_count[:TOP_USERS]:
+        ws.write_string(row, 0, clean(agg.name_of(uid)), F["tot_text"])
+        ws.write_number(row, 1, agg.totals[uid], F["tot_int"])
+        ws.write_blank(row, 2, None, F["tot_text"])
+        row += 1
+        for cid, n in sorted(user_chan[uid].items(), key=lambda kv: -kv[1])[:3]:
+            ws.write_string(row, 0, "    " + lab(cid), F["text"])
+            ws.write_number(row, 1, n, F["int"])
+            ws.write_number(row, 2, n / agg.totals[uid], F["pct"])
+            row += 1
+    row += 1
+
+    # 3. Тепловая карта
+    section("3. Активность по дням недели и часам", f"Часовой пояс: {TZ_NAME}")
+    ws.write_string(row, 0, "День \\ час", F["head"])
+    for hr in range(24):
+        ws.write_number(row, 1 + hr, hr, F["head"])
+    row += 1
+    r0 = row
+    for wd in range(7):
+        ws.write_string(row, 0, WEEKDAYS[wd], F["text"])
+        for hr in range(24):
+            ws.write_number(row, 1 + hr, result.heat.get((wd, hr), 0), F["cell"])
+        row += 1
+    ws.conditional_format(r0, 1, row - 1, 24, {
+        "type": "2_color_scale", "min_color": "#FFFFFF", "max_color": "#E4572E",
+    })
+    row += 1
+
+    # 4. Ответы
+    total_replies = sum(result.replies.values())
+    section("4. Ответы (reply)",
+            "Вложения не считаются: для них нужен привилегированный интент Message Content.")
+    ws.write_string(row, 0, "Ответов всего", F["tot_text"])
+    ws.write_number(row, 1, total_replies, F["tot_int"])
+    ws.write_number(row, 2, total_replies / grand, wb.add_format(
+        {"bold": True, "bg_color": "#F2F2F2", "border": 1, "num_format": "0.0%"}))
+    row += 1
+    for c, t in enumerate(["Пользователь", "Сообщений", "Ответов", "Доля ответов"]):
+        ws.write_string(row, c, t, F["head"])
+    row += 1
+    for uid in by_count[:TABLE_USERS]:
+        rep = result.replies.get(uid, 0)
+        ws.write_string(row, 0, clean(agg.name_of(uid)), F["text"])
+        ws.write_number(row, 1, agg.totals[uid], F["int"])
+        ws.write_number(row, 2, rep, F["int"])
+        ws.write_number(row, 3, rep / agg.totals[uid], F["pct"])
+        row += 1
+    row += 1
+
+    # 5. Динамика
+    prev = result.prev
+    if prev is not None:
+        prev_tot: dict = defaultdict(int)
+        for (uid, _d), n in prev.user_day.items():
+            prev_tot[uid] += n
+        section("5. Динамика к предыдущему периоду",
+                f"Сейчас: {period_text(params)}. Раньше: {prev_period_text(params)} "
+                "(такой же длины). «Новый» — не писал в прошлом периоде, «не писал» — "
+                "писал раньше, но не сейчас; это не то же самое, что вступление/уход с сервера.")
+        for c, t in enumerate(["Пользователь", "Сейчас", "Раньше", "Изменение", "Изм., %", "Статус"]):
+            ws.write_string(row, c, t, F["head"])
+        row += 1
+        cur_sum, prev_sum = sum(agg.totals.values()), sum(prev_tot.values())
+        ws.write_string(row, 0, "ВСЕГО", F["tot_text"])
+        ws.write_number(row, 1, cur_sum, F["tot_int"])
+        ws.write_number(row, 2, prev_sum, F["tot_int"])
+        ws.write_number(row, 3, cur_sum - prev_sum, F["delta"])
+        if prev_sum:
+            ws.write_number(row, 4, (cur_sum - prev_sum) / prev_sum, F["delta_pct"])
+        else:
+            ws.write_blank(row, 4, None, F["tot_text"])
+        ws.write_blank(row, 5, None, F["tot_text"])
+        row += 1
+        uids = set(agg.totals) | set(prev_tot)
+        ranked = sorted(uids, key=lambda u: (-agg.totals.get(u, 0), -prev_tot.get(u, 0),
+                                             agg.name_of(u).casefold()))
+        for uid in ranked[:COMPARE_ROWS]:
+            cur, old = agg.totals.get(uid, 0), prev_tot.get(uid, 0)
+            ws.write_string(row, 0, clean(agg.name_of(uid)), F["text"])
+            ws.write_number(row, 1, cur, F["int"])
+            ws.write_number(row, 2, old, F["int"])
+            ws.write_number(row, 3, cur - old, F["delta"])
+            if old:
+                ws.write_number(row, 4, (cur - old) / old, F["delta_pct"])
+            else:
+                ws.write_blank(row, 4, None, F["text"])
+            status = "новый" if (cur and not old) else "не писал" if (old and not cur) else ""
+            ws.write_string(row, 5, status, F["cell"])
+            row += 1
+        if len(ranked) > COMPARE_ROWS:
+            ws.write_string(row, 0, f"… показаны первые {COMPARE_ROWS} из {len(ranked)}", F["note"])
+            row += 1
+        row += 1
+
+    # 6. Серверы (только в суммарном файле)
+    if result.user_server:
+        srv_total: dict = defaultdict(int)
+        srv_auth: dict = defaultdict(set)
+        for (uid, srv), n in result.user_server.items():
+            srv_total[srv] += n
+            srv_auth[srv].add(uid)
+        servers = sorted(srv_total, key=lambda s: (-srv_total[s], s.casefold()))
+        section("6. Рейтинг серверов")
+        for c, t in enumerate(["Сервер", "Сообщений", "Доля", "Авторов"]):
+            ws.write_string(row, c, t, F["head"])
+        row += 1
+        for srv in servers:
+            ws.write_string(row, 0, clean(srv), F["text"])
+            ws.write_number(row, 1, srv_total[srv], F["int"])
+            ws.write_number(row, 2, srv_total[srv] / grand, F["pct"])
+            ws.write_number(row, 3, len(srv_auth[srv]), F["int"])
+            row += 1
+        row += 1
+        section(f"7. Пользователь × сервер (топ-{MATRIX_USERS} пользователей)")
+        ws.write_string(row, 0, "Пользователь", F["head"])
+        for j, srv in enumerate(servers[:25]):
+            ws.write_string(row, 1 + j, clean(srv), F["head"])
+        ws.set_row(row, 48)
+        row += 1
+        m0 = row
+        for uid in by_count[:MATRIX_USERS]:
+            ws.write_string(row, 0, clean(agg.name_of(uid)), F["text"])
+            for j, srv in enumerate(servers[:25]):
+                n = result.user_server.get((uid, srv), 0)
+                if n:
+                    ws.write_number(row, 1 + j, n, F["cell"])
+                else:
+                    ws.write_blank(row, 1 + j, None, F["cell"])
+            row += 1
+        if row > m0:
+            ws.conditional_format(m0, 1, row - 1, min(25, len(servers)), {
+                "type": "2_color_scale", "min_color": "#FFFFFF", "max_color": "#2E9E5B",
+            })
+        if len(servers) > 25:
+            ws.write_string(row, 0, f"… показаны первые 25 серверов из {len(servers)}", F["note"])
+            row += 1
+
+
+def sheet_info(wb, F, guild_name, params, state, matrix_note, truncated):
+    wi = wb.add_worksheet("Служебное")
+    wi.set_column(0, 0, 40)
+    wi.set_column(1, 1, 90)
+    info = [
+        ("Сервер", guild_name),
+        ("Период", period_text(params)),
+    ]
+    if params.compare:
+        info.append(("Сравнение с периодом", prev_period_text(params)))
+    info += [
+        ("Часовой пояс", TZ_NAME),
+        ("Фильтр: пользователь", params.user.display_name if params.user else "все"),
+        ("Фильтр: канал", chan_label(params.channel) if params.channel else "все"),
+        ("Порядок пользователей", SORT_LABELS[params.sort_key]),
+        ("Матрица", matrix_note),
+        ("Сформирован", datetime.now(TZ).strftime("%d.%m.%Y %H:%M")),
+        ("Каналов и веток обработано", f"{state.channels_done} из {state.total_channels}"),
+        ("Не читались (в периоде там нет сообщений)", fmt_num(state.inactive)),
+        ("Просмотрено сообщений", fmt_num(state.seen)),
+        ("Учтено сообщений", fmt_num(state.counted)),
+        ("Что считается", "Обычные сообщения и ответы людей; боты и системные сообщения не учитываются."),
+    ]
+    if params.compare:
+        info.append(("Про просмотренные", "Счётчики сообщений включают и предыдущий период (его тоже приходится читать)."))
+    if state.cancelled:
+        info.append(("⚠ Внимание", "Сбор остановлен вручную: данные НЕПОЛНЫЕ."))
+    if truncated:
+        info.append(("⚠ Внимание", f"Лист «По дням (список)» обрезан до {fmt_num(MAX_LIST_ROWS)} строк (лимит Excel)."))
+    for note in state.notes:
+        info.append(("Примечание", note))
+    row = 0
+    for k, v in info:
+        wi.write_string(row, 0, k, F["bold"])
+        wi.write_string(row, 1, clean(v), F["wrap"])
+        row += 1
+
+    def section(title: str, items: list[str]):
+        nonlocal row
+        if not items:
+            return
+        row += 1
+        wi.write_string(row, 0, f"{title} ({len(items)})", F["section"])
+        wi.write_blank(row, 1, None, F["section"])
+        for it in items:
+            row += 1
+            wi.write_string(row, 1, clean(it))
+        row += 1
+
+    section("Исключено по правилам (вместе с ветками)", state.excluded)
+    section("Правила исключения, которые ни с чем не совпали", state.unused_rules)
+    section("Нет доступа", state.skipped)
+    section("Ошибки чтения", state.failed)
+
+
+def build_xlsx(guild_name: str, params: ScanParams, state: ScanState, result: ScanResult) -> bytes:
+    agg = aggregate(params, result)
+    buf = io.BytesIO()
+    wb = xlsxwriter.Workbook(buf, {
+        "in_memory": True,
+        "strings_to_numbers": False,
+        "strings_to_formulas": False,
+        "strings_to_urls": False,
+    })
+    F = make_formats(wb)
+    name_w = min(45, max(14, max((len(agg.name_of(u)) for u in agg.order), default=14) + 2))
+
+    sheet_summary(wb, F, agg, params, state, name_w)
+    matrix_note = sheet_matrix(wb, F, agg, params, name_w)
+    truncated = sheet_daily(wb, F, agg, name_w)
+    sheet_analytics(wb, F, agg, result, params, name_w)
+    sheet_info(wb, F, guild_name, params, state, matrix_note, truncated)
+
+    wb.close()
+    return buf.getvalue()
+
+
+# ---------- Текстовый отчёт ----------
+
+def build_report(guild_name: str, params: ScanParams, state: ScanState, result: ScanResult) -> str:
+    agg = aggregate(params, result)
+    order, totals, per_user = agg.order, agg.totals, agg.per_user
+    name_of = agg.name_of
+
+    lines = [
+        "=== ОТЧЕТ ПО СООБЩЕНИЯМ СЕРВЕРА ===",
+        f"Сервер: {guild_name}",
+        f"Период: {period_text(params)} (часовой пояс: {TZ_NAME})",
+        f"Фильтры: пользователь = {params.user.display_name if params.user else 'все'}, "
+        f"канал = {chan_label(params.channel) if params.channel else 'все'}",
+        f"Порядок пользователей: {SORT_LABELS[params.sort_key]}; даты — по возрастанию",
+        f"Сформирован: {datetime.now(TZ).strftime('%d.%m.%Y %H:%M')}",
+        f"Обработано каналов и веток: {state.channels_done} из {state.total_channels}; "
+        f"просмотрено сообщений: {fmt_num(state.seen)}; учтено: {fmt_num(state.counted)}",
+        "Учитываются обычные сообщения и ответы людей (боты и системные сообщения не считаются).",
+    ]
+    if state.cancelled:
+        lines.append("!!! Сбор остановлен вручную: данные НЕПОЛНЫЕ.")
+    for note in state.notes:
+        lines.append(f"Примечание: {note}")
+    if state.excluded:
+        lines.append(f"Исключено по правилам, вместе с ветками ({len(state.excluded)}): {fmt_list(state.excluded)}")
+    if state.unused_rules:
+        lines.append(f"Правила исключения без совпадений ({len(state.unused_rules)}): {fmt_list(state.unused_rules)}")
+    if state.inactive:
+        lines.append(f"Не читались (в периоде там нет сообщений): {state.inactive}")
+    if state.skipped:
+        lines.append(f"Нет доступа к ({len(state.skipped)}): {fmt_list(state.skipped)}")
+    if state.failed:
+        lines.append(f"Ошибка чтения ({len(state.failed)}): {fmt_list(state.failed)}")
+    lines.append("")
+
+    if not order:
+        lines.append("Сообщений за выбранный период не найдено.")
+        return "\n".join(lines) + "\n"
+
+    lines.append("--- ИТОГО ПО ПОЛЬЗОВАТЕЛЯМ ---")
+    lines.append(f"{'№':>4}  {'Пользователь':<{NAME_WIDTH}}  {'ID':<20}  {'Сообщений':>10}  {'Дней':>5}")
+    lines.append("-" * (4 + 2 + NAME_WIDTH + 2 + 20 + 2 + 10 + 2 + 5))
+    for i, uid in enumerate(order, start=1):
+        lines.append(
+            f"{i:>4}  {fit_name(name_of(uid)):<{NAME_WIDTH}}  {uid:<20}  "
+            f"{totals[uid]:>10}  {len(per_user[uid]):>5}"
+        )
+    lines.append(f"{'':>4}  {'ВСЕГО':<{NAME_WIDTH}}  {'':<20}  {sum(totals.values()):>10}")
+    lines.append("")
+
+    lines.append("--- ПОДРОБНО ПО ДНЯМ ---")
+    for uid in order:
+        lines.append("")
+        lines.append(f"{name_of(uid)} (ID {uid}) — всего {totals[uid]}, дней с сообщениями: {len(per_user[uid])}")
+        for day, n in sorted(per_user[uid].items()):
+            lines.append(f"    {day.strftime(DATE_FMT)} | {n}")
+
+    return "\n".join(lines) + "\n"
