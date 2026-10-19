@@ -2,7 +2,7 @@
 
 import io
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
 import xlsxwriter
@@ -35,10 +35,15 @@ class Agg:
     totals: dict
     per_user: dict
     names: dict
+    usernames: dict = field(default_factory=dict)
+    merged: bool = False
 
     def name_of(self, uid: int) -> str:
-        return self.names.get(uid, str(uid))
-
+        nick = self.names.get(uid, str(uid))
+        if self.merged:
+            return nick                      # суммарная статистика: просто ник
+        original = self.usernames.get(uid)
+        return f"{nick} [{original}]" if original else nick
 
 def aggregate(params: ScanParams, result: ScanResult) -> Agg:
     per_user: dict[int, dict[date, int]] = defaultdict(dict)
@@ -55,7 +60,7 @@ def aggregate(params: ScanParams, result: ScanResult) -> Agg:
         order = sorted(totals, key=lambda u: (nm(u), u))
     else:
         order = sorted(totals, key=lambda u: (-totals[u], nm(u), u))
-    return Agg(order, totals, per_user, names)
+    return Agg(order, totals, per_user, names, result.usernames, result.merged)
 
 
 def period_text(params: ScanParams) -> str:

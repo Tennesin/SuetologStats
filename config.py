@@ -44,7 +44,9 @@ EXCLUDE_FILE = os.environ.get("EXCLUDE_FILE") or os.path.join(
 )
 
 DATE_FMT = "%d.%m.%Y"
-NAME_WIDTH = 32
+# Сервер «Суетологи» запущен 27.09.2026 — раньше этой даты искать нечего.
+MIN_START_DATE = date(2026, 9, 27)
+NAME_WIDTH = 48
 PROGRESS_INTERVAL = 15              # секунд между обновлениями прогресса
 UPLOAD_LIMIT = 9 * 1024 * 1024      # с запасом под лимит вложения Discord (10 МБ)
 MAX_MATRIX_COLS = 1000              # максимум столбцов в матрице
@@ -257,6 +259,21 @@ def build_period(period: Optional[str], start_text: Optional[str],
                 raise ValueError("Неверный формат даты конца. Используйте дд.мм.гггг")
         if s and e and s > e:
             raise ValueError("Дата начала позже даты конца.")
+    if e and e < MIN_START_DATE:
+        raise ValueError(
+            f"Период целиком раньше запуска сервера ({MIN_START_DATE.strftime(DATE_FMT)}) — "
+            "там нет данных."
+        )
+    if s is None or s < MIN_START_DATE:
+        s = MIN_START_DATE          # «с начала истории» и слишком ранние даты подрезаются
+
     if compare and not (s and e):
         raise ValueError("Для сравнения нужен ограниченный период: пресет или обе даты.")
+    if compare:
+        length = (e - s).days + 1
+        if s - timedelta(days=length) < MIN_START_DATE:
+            raise ValueError(
+                "Для сравнения предыдущий период такой же длины начался бы раньше "
+                f"{MIN_START_DATE.strftime(DATE_FMT)} — сравнивать не с чем."
+            )
     return s, e, key, label

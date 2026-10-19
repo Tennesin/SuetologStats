@@ -65,6 +65,8 @@ class ScanResult:
     heat: dict = field(default_factory=lambda: defaultdict(int))          # (weekday, hour) -> n
     replies: dict = field(default_factory=lambda: defaultdict(int))       # uid -> n
     names: dict = field(default_factory=dict)                             # uid -> ник
+    usernames: dict = field(default_factory=dict)                         # uid -> оригинальный ник
+    merged: bool = False                                                  # True у суммарного результата
     channel_names: dict = field(default_factory=dict)                     # channel_id -> название
     user_server: dict = field(default_factory=lambda: defaultdict(int))   # (uid, сервер) -> n (только в сумме)
     prev: Optional["ScanResult"] = None                                   # предыдущий период
@@ -314,6 +316,7 @@ async def scan_channels(channels, params: ScanParams, state: ScanState) -> ScanR
     if params.prev_range:
         prev = ScanResult()
         prev.names = main.names                    # ники и названия каналов общие
+        prev.usernames = main.usernames
         prev.channel_names = main.channel_names
         main.prev = prev
 
@@ -352,6 +355,7 @@ async def scan_channels(channels, params: ScanParams, state: ScanState) -> ScanR
                     if ts is None or m.created_at >= ts:
                         name_ts[uid] = m.created_at
                         main.names[uid] = author.display_name
+                        main.usernames[uid] = author.name
                     if target is main:
                         state.counted += 1
             except discord.Forbidden:
@@ -428,6 +432,7 @@ def _merge_into(dst: ScanResult, src: ScanResult, server: Optional[str]):
 def merge_results(results):
     """results: список (guild, state, ScanResult). Возвращает (ScanResult, ScanState)."""
     merged = ScanResult()
+    merged.merged = True       # в суммарном отчёте ники показываются без оригинального
     total = ScanState()
     have_prev = bool(results) and all(r.prev is not None for _, _, r in results)
     if have_prev:
