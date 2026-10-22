@@ -625,6 +625,10 @@ def sheet_info(wb, F, guild_name, params, state, matrix_note, truncated, merged=
     info = [
         ("Сервер", guild_name),
         ("Период", period_text(params)),
+        ("Схема данных", "2"),
+        ("Период: начало (ISO)", params.start_date.isoformat() if params.start_date else "нет"),
+        ("Период: конец (ISO)", params.end_date.isoformat() if params.end_date else "нет"),
+        ("Суммарный файл", "да" if merged else "нет"),
     ]
     if params.compare:
         info.append(("Сравнение с периодом", prev_period_text(params)))
@@ -708,10 +712,6 @@ def build_report(guild_name: str, params: ScanParams, state: ScanState, result: 
         "=== ОТЧЕТ ПО СООБЩЕНИЯМ СЕРВЕРА ===",
         f"Сервер: {guild_name}",
         f"Период: {period_text(params)} (часовой пояс: {TZ_NAME})",
-        ("Схема данных", "2"),
-        ("Период: начало (ISO)", params.start_date.isoformat() if params.start_date else "нет"),
-        ("Период: конец (ISO)", params.end_date.isoformat() if params.end_date else "нет"),
-        ("Суммарный файл", "да" if merged else "нет"),
         f"Фильтры: пользователь = {params.user.display_name if params.user else 'все'}, "
         f"канал = {chan_label(params.channel) if params.channel else 'все'}",
         f"Порядок пользователей: {SORT_LABELS[params.sort_key]}; даты — по возрастанию",
