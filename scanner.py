@@ -15,7 +15,7 @@ from typing import Optional
 import discord
 
 from config import (
-    CONCURRENCY, EXCLUDE_FILE, IGNORED_CHATS, PROGRESS_INTERVAL, TZ,
+    ADMIN_ROLES, CONCURRENCY, EXCLUDE_FILE, IGNORED_CHATS, PROGRESS_INTERVAL, TZ,
     fmt_duration, fmt_list, fmt_num, log,
 )
 
@@ -57,6 +57,21 @@ class ScanParams:
         prev_end = self.start_date - timedelta(days=1)
         return prev_end - timedelta(days=length - 1), prev_end
 
+@dataclass
+class StaffMember:
+    name: str                  # отображаемый ник
+    username: str              # оригинальный логин
+    kind: str                  # "owner" или "admin"
+    roles: list = field(default_factory=list)   # какие роли из ADMIN_ROLES у человека
+
+
+@dataclass
+class StaffInfo:
+    owner_id: Optional[int] = None
+    members: dict = field(default_factory=dict)          # uid -> StaffMember
+    unmatched_roles: list = field(default_factory=list)  # правила из ADMIN_ROLES без совпадений
+    partial: bool = False                                # список участников мог загрузиться не полностью
+
 
 @dataclass
 class ScanResult:
@@ -70,6 +85,8 @@ class ScanResult:
     channel_names: dict = field(default_factory=dict)                     # channel_id -> название
     user_server: dict = field(default_factory=lambda: defaultdict(int))   # (uid, сервер) -> n (только в сумме)
     prev: Optional["ScanResult"] = None                                   # предыдущий период
+    staff: Optional["StaffInfo"] = None                                   # администрация сервера
+    staff_servers: dict = field(default_factory=dict)                     # сервер -> StaffInfo (только в сумме)
 
     @property
     def total(self) -> int:
@@ -304,6 +321,71 @@ async def collect_channels(guild: discord.Guild, params: ScanParams,
     state.unused_rules = rules.unused()
     return readable
 
+# ---------- Состав администрации ----------
+
+async def collect_staff(guild: discord.Guild, state: ScanState) -> StaffInfo:
+    """Основатель (владелец сервера) + участники с ролями из ADMIN_ROLES."""
+    info = StaffInfo(owner_id=guild.owner_id)
+
+    if not guild.chunked:
+        try:
+            await guild.chunk()
+        except Exception as e:
+            log.warning("[%s] Не удалось загрузить список участников: %s", guild.name, e)
+            state.notes.append("Не удалось полностью загрузить список участников — состав администрации может быть неполным.")
+            info.partial = True
+
+    wanted: dict[str, str] = {}      # ключ правила -> как показывать в отчёте
+    for item in ADMIN_ROLES:
+        if isinstance(item, int) or looks_like_id(str(item)):
+            wanted[f"id:{int(item)}"] = str(item)
+        elif norm_name(item):
+            wanted[f"name:{norm_name(item)}"] = str(item).strip()
+
+    admin_roles: dict[int, discord.Role] = {}
+    hit: set[str] = set()
+    for role in guild.roles:
+        if role.is_default():
+            continue
+        for key in (f"id:{role.id}", f"name:{norm_name(role.name)}"):
+            if key in wanted:
+                admin_roles[role.id] = role
+                hit.add(key)
+    info.unmatched_roles = [label for key, label in wanted.items() if key not in hit]
+
+    for m in guild.members:
+        if m.bot:
+            continue
+        roles = [r.name for r in m.roles if r.id in admin_roles]
+        if m.id == guild.owner_id:
+            kind = "owner"
+        elif roles:
+            kind = "admin"
+        else:
+            continue
+        info.members[m.id] = StaffMember(m.display_name, m.name, kind, roles)
+
+    # Владельца может не быть в кэше — докачиваем отдельно.
+    if guild.owner_id and guild.owner_id not in info.members:
+        try:
+            om = await guild.fetch_member(guild.owner_id)
+            info.members[om.id] = StaffMember(
+                om.display_name, om.name, "owner",
+                [r.name for r in om.roles if r.id in admin_roles])
+        except discord.HTTPException:
+            info.members[guild.owner_id] = StaffMember(str(guild.owner_id), "", "owner", [])
+
+    if guild.member_count and len(guild.members) < guild.member_count:
+        info.partial = True
+        state.notes.append(
+            f"В кэше {len(guild.members)} из {guild.member_count} участников — "
+            "состав администрации мог определиться не полностью."
+        )
+    if info.unmatched_roles:
+        state.notes.append(
+            "Роли из ADMIN_ROLES не найдены на сервере: " + ", ".join(info.unmatched_roles)
+        )
+    return info
 
 # ---------- Чтение истории ----------
 
@@ -402,7 +484,10 @@ async def scan_guild(guild: discord.Guild, params: ScanParams, bot_user_id: int,
             "[%s] к чтению: %d; исключено: %d; без доступа: %d; пропущено как неактивные: %d",
             guild.name, len(channels), len(state.excluded), len(state.skipped), state.inactive,
         )
-        return await scan_channels(channels, params, state)
+        staff = await collect_staff(guild, state)
+        result = await scan_channels(channels, params, state)
+        result.staff = staff
+        return result
     finally:
         progress_task.cancel()
         with suppress(asyncio.CancelledError):
@@ -445,6 +530,8 @@ def merge_results(results):
         server = g.name if g.name not in used else f"{g.name} ({g.id})"
         used.add(server)
         _merge_into(merged, r, server)
+        if r.staff is not None:
+            merged.staff_servers[server] = r.staff
         if have_prev:
             _merge_into(merged.prev, r.prev, None)
         total.total_channels += s.total_channels

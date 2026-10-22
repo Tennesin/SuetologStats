@@ -1,6 +1,7 @@
 """Построение отчётов (xlsx и txt) из ScanResult. С Discord напрямую не работает."""
 
 import io
+from typing import Optional
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -19,6 +20,7 @@ TABLE_USERS = 15
 MATRIX_USERS = 30
 COMPARE_ROWS = 500
 WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+KIND_RU = {"owner": "Основатель", "admin": "Админ"}
 
 MODE_TITLES = {
     "days": "по дням",
@@ -37,6 +39,8 @@ class Agg:
     names: dict
     usernames: dict = field(default_factory=dict)
     merged: bool = False
+    staff: Optional[object] = None
+    staff_servers: dict = field(default_factory=dict)
 
     def name_of(self, uid: int) -> str:
         nick = self.names.get(uid, str(uid))
@@ -44,6 +48,17 @@ class Agg:
             return nick                      # суммарная статистика: просто ник
         original = self.usernames.get(uid)
         return f"{nick} [{original}]" if original else nick
+
+    def role_of(self, uid: int) -> str:
+        """Должность для колонки «Роль»; в суммарном файле — по каждому серверу."""
+        if self.staff_servers:
+            return ", ".join(
+                f"{KIND_RU[i.members[uid].kind]} ({srv})"
+                for srv, i in self.staff_servers.items() if uid in i.members
+            )
+        if self.staff and uid in self.staff.members:
+            return KIND_RU[self.staff.members[uid].kind]
+        return ""
 
 def aggregate(params: ScanParams, result: ScanResult) -> Agg:
     per_user: dict[int, dict[date, int]] = defaultdict(dict)
@@ -60,7 +75,8 @@ def aggregate(params: ScanParams, result: ScanResult) -> Agg:
         order = sorted(totals, key=lambda u: (nm(u), u))
     else:
         order = sorted(totals, key=lambda u: (-totals[u], nm(u), u))
-    return Agg(order, totals, per_user, names, result.usernames, result.merged)
+    return Agg(order, totals, per_user, names, result.usernames, result.merged,
+               result.staff, result.staff_servers)
 
 
 def period_text(params: ScanParams) -> str:
@@ -75,6 +91,30 @@ def prev_period_text(params: ScanParams) -> str:
     pr = params.prev_range
     return f"{pr[0].strftime(DATE_FMT)} — {pr[1].strftime(DATE_FMT)}" if pr else ""
 
+
+def staff_blocks(result: ScanResult, guild_name: str) -> list:
+    """[(название сервера, StaffInfo)] — один блок для сервера или по блоку на каждый в сумме."""
+    if result.staff_servers:
+        return list(result.staff_servers.items())
+    return [(guild_name, result.staff)] if result.staff else []
+
+
+def staff_rows(agg: Agg, result: ScanResult, srv: str, info):
+    """Сортировка: основатель первым, затем админы по убыванию сообщений.
+    Возвращает ([(uid, member, сообщений)], всего сообщений на сервере)."""
+    if result.merged:
+        def msgs(uid): return result.user_server.get((uid, srv), 0)
+        total = sum(n for (_u, s), n in result.user_server.items() if s == srv)
+    else:
+        def msgs(uid): return agg.totals.get(uid, 0)
+        total = sum(agg.totals.values())
+    rows = [(uid, mb, msgs(uid)) for uid, mb in info.members.items()]
+    rows.sort(key=lambda r: (r[1].kind != "owner", -r[2], r[1].name.casefold()))
+    return rows, total
+
+
+def staff_label(mb) -> str:
+    return f"{mb.name} [{mb.username}]" if mb.username else mb.name
 
 # ---------- Детализация матрицы ----------
 
@@ -155,7 +195,7 @@ def sheet_summary(wb, F, agg: Agg, params, state, name_w):
         ws.merge_range(0, 0, 0, 8, "⚠ Сбор остановлен вручную: данные НЕПОЛНЫЕ.", F["banner"])
         top = 1
     headers = ["№", "Пользователь", "ID", "Сообщений", "Дней с сообщениями",
-               "Среднее в активный день", "Первая дата", "Последняя дата", "Доля от всех"]
+               "Среднее в активный день", "Первая дата", "Последняя дата", "Доля от всех", "Роль"]
     for c, h in enumerate(headers):
         ws.write_string(top, c, h, F["head"])
     ws.set_row(top, 32)
@@ -165,6 +205,7 @@ def sheet_summary(wb, F, agg: Agg, params, state, name_w):
     ws.set_column(3, 5, 14)
     ws.set_column(6, 7, 14)
     ws.set_column(8, 8, 12)
+    ws.set_column(9, 9, 28)
 
     for i, uid in enumerate(order, start=1):
         r = top + i
@@ -179,6 +220,7 @@ def sheet_summary(wb, F, agg: Agg, params, state, name_w):
         ws.write_datetime(r, 6, min(days), F["date"])
         ws.write_datetime(r, 7, max(days), F["date"])
         ws.write_number(r, 8, n / grand_total if grand_total else 0, F["pct"])
+        ws.write_string(r, 9, agg.role_of(uid), F["text"])
     if order:
         last_row = top + len(order)
         ws.autofilter(top, 0, last_row, len(headers) - 1)
@@ -467,6 +509,59 @@ def sheet_analytics(wb, F, agg: Agg, result: ScanResult, params: ScanParams, nam
             row += 1
 
 
+def sheet_staff(wb, F, agg: Agg, result: ScanResult, guild_name: str, name_w):
+    ws = wb.add_worksheet("Администрация")
+    ws.set_column(0, 0, max(name_w, 30))
+    ws.set_column(1, 1, 21)
+    ws.set_column(2, 2, 14)
+    ws.set_column(3, 3, 40)
+    ws.set_column(4, 5, 14)
+    blocks = staff_blocks(result, guild_name)
+    if not blocks:
+        ws.write_string(0, 0, "Данные об администрации не собраны.")
+        return
+
+    row = 0
+    for srv, info in blocks:
+        rows, total = staff_rows(agg, result, srv, info)
+        ws.merge_range(row, 0, row, 5, f"Сервер: {srv}", F["section"])
+        row += 1
+        for c, h in enumerate(["Пользователь", "ID", "Должность", "Роли администрации",
+                               "Сообщений", "Доля от всех"]):
+            ws.write_string(row, c, h, F["head"])
+        row += 1
+        staff_sum = 0
+        for uid, mb, n in rows:
+            staff_sum += n
+            ws.write_string(row, 0, clean(staff_label(mb)), F["text"])
+            ws.write_string(row, 1, str(uid), F["text"])
+            ws.write_string(row, 2, KIND_RU[mb.kind], F["text"])
+            ws.write_string(row, 3, clean(", ".join(mb.roles) or "—"), F["text"])
+            ws.write_number(row, 4, n, F["int"])
+            ws.write_number(row, 5, n / total if total else 0, F["pct"])
+            row += 1
+        ws.write_string(row, 0, f"Администрация всего: {len(rows)} чел.", F["tot_text"])
+        ws.write_blank(row, 1, None, F["tot_text"])
+        ws.write_blank(row, 2, None, F["tot_text"])
+        ws.write_blank(row, 3, None, F["tot_text"])
+        ws.write_number(row, 4, staff_sum, F["tot_int"])
+        ws.write_number(row, 5, staff_sum / total if total else 0, F["pct"])
+        row += 1
+        ws.write_string(row, 0, "Остальные участники", F["text"])
+        for c in (1, 2, 3):
+            ws.write_blank(row, c, None, F["text"])
+        ws.write_number(row, 4, total - staff_sum, F["int"])
+        ws.write_number(row, 5, (total - staff_sum) / total if total else 0, F["pct"])
+        row += 1
+        if info.unmatched_roles:
+            ws.write_string(row, 0, "Не найдены роли из ADMIN_ROLES: " + ", ".join(info.unmatched_roles), F["note"])
+            row += 1
+        if info.partial:
+            ws.write_string(row, 0, "Список участников мог загрузиться не полностью.", F["note"])
+            row += 1
+        row += 1
+
+
 def sheet_info(wb, F, guild_name, params, state, matrix_note, truncated):
     wi = wb.add_worksheet("Служебное")
     wi.set_column(0, 0, 40)
@@ -538,6 +633,7 @@ def build_xlsx(guild_name: str, params: ScanParams, state: ScanState, result: Sc
     matrix_note = sheet_matrix(wb, F, agg, params, name_w)
     truncated = sheet_daily(wb, F, agg, name_w)
     sheet_analytics(wb, F, agg, result, params, name_w)
+    sheet_staff(wb, F, agg, result, guild_name, name_w)
     sheet_info(wb, F, guild_name, params, state, matrix_note, truncated)
 
     wb.close()
@@ -578,6 +674,20 @@ def build_report(guild_name: str, params: ScanParams, state: ScanState, result: 
     if state.failed:
         lines.append(f"Ошибка чтения ({len(state.failed)}): {fmt_list(state.failed)}")
     lines.append("")
+
+    for srv, info in staff_blocks(result, guild_name):
+        rows, total = staff_rows(agg, result, srv, info)
+        lines.append(f"--- АДМИНИСТРАЦИЯ: {srv} ---")
+        staff_sum = 0
+        for uid, mb, n in rows:
+            staff_sum += n
+            roles = f" ({', '.join(mb.roles)})" if mb.roles else ""
+            lines.append(f"  {KIND_RU[mb.kind]}: {staff_label(mb)} (ID {uid}){roles} — сообщений: {n}")
+        share = f"{staff_sum / total * 100:.1f}%" if total else "0%"
+        lines.append(f"  Всего: {len(rows)} чел., сообщений: {staff_sum} ({share} от всех)")
+        if info.unmatched_roles:
+            lines.append(f"  Не найдены роли из ADMIN_ROLES: {', '.join(info.unmatched_roles)}")
+        lines.append("")
 
     if not order:
         lines.append("Сообщений за выбранный период не найдено.")

@@ -14,7 +14,6 @@
   cli.py      — команды терминала
 
 Права бота: «Просмотр каналов» и «Читать историю сообщений».
-Привилегированные интенты не нужны.
 Требуется: pip install -U discord.py XlsxWriter python-dotenv tzdata
 """
 
@@ -29,7 +28,8 @@ from config import TOKEN, log
 class StatBot(discord.Client):
     def __init__(self):
         intents = discord.Intents.none()
-        intents.guilds = True   # привилегированные интенты не нужны
+        intents.guilds = True
+        intents.members = True
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
 

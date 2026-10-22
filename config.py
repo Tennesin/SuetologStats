@@ -34,6 +34,10 @@ IGNORED_CHATS = [
     1554857793821872128, 1554900297279868928, 1560031163190353960,
 ]
 
+ADMIN_ROLES = [
+    "Суетологи", "Зам. главы"
+]
+
 TOKEN = os.environ.get("DISCORD_TOKEN")
 TZ_NAME = os.environ.get("TIMEZONE", "Asia/Tashkent").strip() or "Asia/Tashkent"
 STATS_DIR = os.environ.get("STATS_DIR")
