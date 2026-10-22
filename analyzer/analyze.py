@@ -6,10 +6,17 @@
 
 import argparse
 import sys
+import re
+import traceback
+import pandas as pd
 from pathlib import Path
 
+import settings as S
 from loader import Dataset, LoaderError, discover, load_dataset
-from metrics import server_metrics, user_metrics
+from metrics import calendar_days, server_metrics, user_metrics
+from report_html import build_server_html, build_user_html
+from report_xlsx import build_summary_xlsx
+from scoring import compute_skp
 from settings import WEEKDAYS
 
 def describe(ds: Dataset):
@@ -36,6 +43,31 @@ def describe(ds: Dataset):
         print("  Проверки пройдены без замечаний.")
 
 
+def slugify(text: str) -> str:
+    return re.sub(r"[^\w\-]+", "_", text, flags=re.U).strip("_")[:60] or "report"
+
+
+def make_reports(ds: Dataset, out_dir: Path, args):
+    """Строит HTML (серверный + индивидуальные). Возвращает (папка, данные для сводного xlsx)."""
+    sm = server_metrics(ds)
+    um = user_metrics(ds)
+    sk = compute_skp(ds, um, args.top_n, args.min_skp) if len(um) else pd.DataFrame()
+
+    folder = out_dir / slugify(ds.path.stem)
+    (folder / "users").mkdir(parents=True, exist_ok=True)
+
+    linked = set()
+    if len(sk):
+        days = calendar_days(ds)
+        chosen = sk[sk["selected"]].head(args.max_individual).index
+        for uid in chosen:
+            html_text = build_user_html(ds, uid, um, sk, days)
+            (folder / "users" / f"{uid}.html").write_text(html_text, encoding="utf-8")
+            linked.add(uid)
+    (folder / "report.html").write_text(build_server_html(ds, sm, um, sk, linked), encoding="utf-8")
+    return folder, {"ds": ds, "sm": sm, "um": um, "sk": sk}
+
+
 def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -43,6 +75,14 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Автономный анализатор отчётов бота")
     ap.add_argument("path", help="папка с xlsx-файлами (или один файл)")
     ap.add_argument("--top", type=int, default=10, help="сколько пользователей показать в топе (0 — не показывать)")
+    ap.add_argument("--out", help="куда сохранять отчёты (по умолчанию — папка analysis рядом с xlsx)")
+    ap.add_argument("--no-reports", action="store_true", help="только сводка в терминале, без HTML и xlsx")
+    ap.add_argument("--top-n", type=int, default=S.SELECT_TOP_N,
+                    help="сколько лучших по СКП получают индивидуальный отчёт")
+    ap.add_argument("--min-skp", type=float, default=S.SELECT_MIN_SKP,
+                    help="и все, у кого СКП не ниже этого значения")
+    ap.add_argument("--max-individual", type=int, default=S.MAX_INDIVIDUAL,
+                    help="предел числа индивидуальных отчётов на файл")
     args = ap.parse_args()
 
     root = Path(args.path).expanduser()
@@ -65,9 +105,29 @@ def main() -> int:
         except LoaderError as e:
             print(f"\n[пропущен] {p.name}: {e}")
 
+    out_dir = Path(args.out).expanduser() if args.out else files[0].parent / "analysis"
+    results = []
     for ds in loaded:
         describe(ds)
         show_metrics(ds, args.top)
+        if args.no_reports:
+            continue
+        try:
+            folder, item = make_reports(ds, out_dir, args)
+            results.append(item)
+            print(f"\n  HTML-отчёт: {folder / 'report.html'}")
+        except Exception:
+            print(f"\n  [ошибка построения отчёта для {ds.path.name}]")
+            traceback.print_exc()
+
+    if results:
+        xlsx_path = out_dir / "analysis_summary.xlsx"
+        try:
+            build_summary_xlsx(results, xlsx_path)
+            print(f"\nСводный xlsx: {xlsx_path}")
+        except Exception:
+            print("\n[ошибка построения сводного xlsx]")
+            traceback.print_exc()
 
     if not loaded:
         return 1

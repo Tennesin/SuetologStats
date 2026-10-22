@@ -1,0 +1,161 @@
+"""Этап 5: сводный xlsx по результатам анализа."""
+
+import math
+import re
+from datetime import date, datetime
+
+import numpy as np
+import pandas as pd
+import xlsxwriter
+
+import settings as S
+
+_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _put(ws, r, c, v, fmt=None):
+    if v is None or v is pd.NaT:
+        ws.write_blank(r, c, None, fmt)
+    elif isinstance(v, (bool, np.bool_)):
+        ws.write_string(r, c, "да" if v else "нет", fmt)
+    elif isinstance(v, (int, float, np.integer, np.floating)):
+        f = float(v)
+        if math.isfinite(f):
+            ws.write_number(r, c, f, fmt)
+        else:
+            ws.write_blank(r, c, None, fmt)
+    elif isinstance(v, (date, datetime)):
+        ws.write_string(r, c, v.strftime("%d.%m.%Y"), fmt)
+    else:
+        ws.write_string(r, c, _CTRL.sub("", str(v)), fmt)
+
+
+def _sheet_name(base: str, used: set) -> str:
+    name = re.sub(r"[\[\]:*?/\\]", "_", base).strip("'")[:31] or "Лист"
+    cand, i = name, 2
+    while cand.lower() in used:
+        suffix = f" ({i})"
+        cand = name[: 31 - len(suffix)] + suffix
+        i += 1
+    used.add(cand.lower())
+    return cand
+
+
+SERVER_HEADERS = ["Сервер", "Суммарный", "Период", "Дней в окне", "Пользователей", "Сообщений",
+                  "В среднем в день", "DAU (среднее)", "Джини", "Доля топ-5", "Тренд",
+                  "Удержание 1→2 половина", "Достоверность", "Предупреждений"]
+SERVER_FMTS = ["text", "text", "text", "int", "int", "int", "dec1", "dec1", "dec", "pct", "text",
+               "pct", "text", "int"]
+
+USER_COLUMNS = [
+    ("№ по СКП", "skp_rank", "int"), ("Пользователь", "name", "text"), ("Логин", "username", "text"),
+    ("ID", "__uid", "text"), ("СКП", "skp", "dec1"), ("Уровень СКП", "skp_level", "text"),
+    ("Достоверность", "reliability", "text"), ("Сообщений", "messages", "int"),
+    ("Место по сообщениям", "rank", "int"), ("Активных дней", "active_days", "int"),
+    ("Доля активных дней", "active_share", "pct"), ("Недель активно", "weeks_active", "int"),
+    ("Среднее в активный день", "avg_per_active_day", "dec"), ("Макс. за день", "max_day", "int"),
+    ("Лучшая серия", "longest_streak", "int"), ("Текущая серия", "current_streak", "int"),
+    ("Дней с последнего сообщения", "days_since_last", "int"), ("Тренд", "trend", "text"),
+    ("Ответов", "replies", "int"), ("Доля ответов", "reply_share", "pct"),
+    ("Каналов", "channels_used", "int"), ("Главный канал", "top_channel", "text"),
+    ("V вклад", "V", "dec"), ("C постоянство", "C", "dec"), ("R охват", "R", "dec"),
+    ("I взаимодействие", "I", "dec"), ("D зависимость", "D", "dec"), ("P роль", "P", "dec"),
+    ("Риск потери", "risk_shown", "dec1"), ("Уровень риска", "risk_level_shown", "text"),
+    ("Роль", "role", "text"),
+]
+
+METHOD_LINES = [
+    "СКП — значимость пользователя для сервера, 0–100. Сумма шести компонентов (0–1) с весами:",
+    f"V вклад ({S.SKP_WEIGHTS['V']:.0%}): ln(1+n)/ln(1+P95), P95 — 95-й перцентиль сообщений по серверу.",
+    f"C постоянство ({S.SKP_WEIGHTS['C']:.0%}): {S.SKP_C_DAYS_W} × доля активных дней + {1 - S.SKP_C_DAYS_W:.1f} × доля активных недель.",
+    f"R охват ({S.SKP_WEIGHTS['R']:.0%}): каналов с ≥{S.SKP_R_MIN_MSGS} сообщений / min({S.SKP_R_CAP}, число значимых каналов); значимый канал — ≥{S.SKP_SIG_CHANNEL:.0%} сообщений сервера.",
+    f"I взаимодействие ({S.SKP_WEIGHTS['I']:.0%}): доля ответов, сглаженная к среднему по серверу, относительно потолка {S.SKP_I_CEIL}.",
+    f"D зависимость сервера ({S.SKP_WEIGHTS['D']:.0%}): максимальная доля человека в сообщениях значимого канала / {S.SKP_D_CEIL}.",
+    f"P роль ({S.SKP_WEIGHTS['P']:.0%}): основатель {S.SKP_ROLE['owner']}, админ {S.SKP_ROLE['admin']}, остальные 0.",
+    "Динамика в СКП не входит. Если компонент недоступен (старый формат файла), его вес перераспределяется.",
+    "",
+    f"Риск потери (справочно, только для выбранных): {S.RISK_WEIGHTS['recency']:.0%} давность молчания, "
+    f"{S.RISK_WEIGHTS['decline']:.0%} снижение темпа, {S.RISK_WEIGHTS['streak']:.0%} прерванная серия.",
+    "",
+    "Веса и пороги заданы экспертно и не калибровались на эталонных данных.",
+    "СКП сравнивает людей внутри одного сервера за период; это не оценка человека.",
+    "Достоверность (низкая/средняя/высокая) зависит от длины окна, числа сообщений и людей; "
+    "при короткой истории все выводы ориентировочные.",
+]
+
+
+def _server_row(it) -> list:
+    ds, sm = it["ds"], it["sm"]
+    base = [ds.title, "да" if ds.is_merged else "нет", ds.period_text, ds.window_days]
+    level = sm["reliability"]["level"]
+    if sm["empty"]:
+        return base + [0, 0] + [None] * 6 + [level, len(ds.warnings)]
+    ov, d, tr, lc = sm["overview"], sm["distribution"], sm["trend"], sm["lifecycle"]
+    return base + [sm["users"], sm["messages"], ov["avg_per_day"], ov["avg_dau"], d["gini"], d["top5"],
+                   tr["direction"] if tr["available"] else "не оценивается",
+                   lc.get("retention"), level, len(ds.warnings)]
+
+
+def build_summary_xlsx(items: list, path):
+    wb = xlsxwriter.Workbook(str(path), {"strings_to_numbers": False, "strings_to_formulas": False,
+                                         "strings_to_urls": False})
+    border = {"border": 1, "border_color": "#D9D9D9", "valign": "vcenter"}
+    F = {
+        "head": wb.add_format({"bold": True, "bg_color": "#1F4E78", "font_color": "#FFFFFF", "border": 1,
+                               "align": "center", "valign": "vcenter", "text_wrap": True}),
+        "text": wb.add_format(border),
+        "int": wb.add_format({**border, "num_format": "#,##0"}),
+        "dec": wb.add_format({**border, "num_format": "0.00"}),
+        "dec1": wb.add_format({**border, "num_format": "0.0"}),
+        "pct": wb.add_format({**border, "num_format": "0.0%"}),
+        "wrap": wb.add_format({"text_wrap": True, "valign": "top"}),
+    }
+    used: set = set()
+
+    # Серверы
+    ws = wb.add_worksheet(_sheet_name("Серверы", used))
+    for c, h in enumerate(SERVER_HEADERS):
+        ws.write_string(0, c, h, F["head"])
+    ws.set_row(0, 34)
+    ws.set_column(0, 0, 34)
+    ws.set_column(1, 1, 11)
+    ws.set_column(2, 2, 38)
+    ws.set_column(3, len(SERVER_HEADERS) - 1, 14)
+    for r, it in enumerate(items, start=1):
+        for c, (v, f) in enumerate(zip(_server_row(it), SERVER_FMTS)):
+            _put(ws, r, c, v, F[f])
+    ws.freeze_panes(1, 1)
+
+    # Пользователи
+    for it in items:
+        um, sk, ds = it["um"], it["sk"], it["ds"]
+        if um is None or um.empty or sk is None or sk.empty:
+            continue
+        df = um.join(sk).sort_values("skp", ascending=False, kind="stable")
+        df["__uid"] = df.index.astype(str)
+        df["risk_shown"] = df["risk"].where(df["selected"])
+        df["risk_level_shown"] = df["risk_level"].where(df["selected"], "")
+        ws = wb.add_worksheet(_sheet_name(f"Польз. {ds.title}", used))
+        for c, (h, _k, _f) in enumerate(USER_COLUMNS):
+            ws.write_string(0, c, h, F["head"])
+        ws.set_row(0, 46)
+        for r, (_uid, row) in enumerate(df.iterrows(), start=1):
+            for c, (_h, key, f) in enumerate(USER_COLUMNS):
+                _put(ws, r, c, row[key], F[f])
+        ws.set_column(0, 0, 9)
+        ws.set_column(1, 2, 24)
+        ws.set_column(3, 3, 21)
+        ws.set_column(4, 20, 13)
+        ws.set_column(21, 21, 28)
+        ws.set_column(22, 29, 11)
+        ws.set_column(30, 30, 28)
+        ws.autofilter(0, 0, len(df), len(USER_COLUMNS) - 1)
+        ws.freeze_panes(1, 2)
+
+    # Методика
+    ws = wb.add_worksheet(_sheet_name("Методика", used))
+    ws.set_column(0, 0, 130)
+    for r, line in enumerate(METHOD_LINES):
+        ws.write_string(r, 0, line, F["wrap"])
+
+    wb.close()
