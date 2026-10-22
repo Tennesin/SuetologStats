@@ -54,6 +54,7 @@ class Dataset:
     servers: pd.DataFrame
     staff: pd.DataFrame
     warnings: list = field(default_factory=list)
+    filtered: str = ""
 
     @property
     def total_messages(self) -> int:
@@ -338,6 +339,14 @@ def _build(wb, path: Path) -> Dataset:
         warnings.append("Лист «По дням (список)» обрезан лимитом строк: суммы по дням занижены.")
     if not meta.get("Часовой пояс"):
         warnings.append("В файле не указан часовой пояс.")
+    flt = []
+    if meta.get("Фильтр: пользователь", "все") != "все":
+        flt.append("пользователь = " + meta["Фильтр: пользователь"])
+    if meta.get("Фильтр: канал", "все") != "все":
+        flt.append("канал = " + meta["Фильтр: канал"])
+    if flt:
+        warnings.append("Отчёт построен с фильтром (" + "; ".join(flt) + "): это НЕ весь сервер, "
+                        "метрики сервера будут искажены.")
 
     if not truncated:
         sum_tot = {r["uid"]: r["n"] for r in summary}
@@ -369,6 +378,7 @@ def _build(wb, path: Path) -> Dataset:
         excluded=sections.get("Исключено по правилам (вместе с ветками)", []),
         users=users, daily=daily, prev_daily=prev_daily, channels=channels, heat=heat,
         heat_total=heat_total, servers=servers, staff=staff, warnings=warnings,
+        filtered="; ".join(flt),
     )
 
 
