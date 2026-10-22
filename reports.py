@@ -562,7 +562,63 @@ def sheet_staff(wb, F, agg: Agg, result: ScanResult, guild_name: str, name_w):
         row += 1
 
 
-def sheet_info(wb, F, guild_name, params, state, matrix_note, truncated):
+def sheet_data(wb, agg: Agg, result: ScanResult):
+    """Скрытые машиночитаемые листы для автономного анализатора: полные данные без обрезаний.
+    ID пишутся строкой: числа в Excel теряют точность после 15 цифр."""
+
+    def table(name, headers, rows):
+        ws = wb.add_worksheet(name)
+        ws.write_row(0, 0, headers)
+        r = 0
+        for row in rows:
+            if r >= MAX_LIST_ROWS:
+                break
+            r += 1
+            for c, v in enumerate(row):
+                if isinstance(v, str):
+                    ws.write_string(r, c, clean(v))
+                else:
+                    ws.write_number(r, c, v)
+        ws.hide()
+
+    prev_users = set()
+    if result.prev is not None:
+        prev_users = {u for (u, _d) in result.prev.user_day}
+    extra = sorted(prev_users - set(agg.order))     # писали только в прошлом периоде
+
+    table(
+        "data_users",
+        ["uid", "name", "username", "messages", "replies", "role"],
+        ((str(u), agg.names.get(u, str(u)), agg.usernames.get(u, ""),
+          agg.totals.get(u, 0), result.replies.get(u, 0), agg.role_of(u))
+         for u in [*agg.order, *extra]),
+    )
+    table(
+        "data_channels",
+        ["uid", "channel_id", "channel", "messages"],
+        ((str(u), str(cid), result.channel_names.get(cid, ""), n)
+         for (u, cid), n in result.user_channel.items()),
+    )
+    table(
+        "data_heat",
+        ["uid", "weekday", "hour", "messages"],
+        ((str(u), wd, hr, n) for (u, wd, hr), n in result.user_heat.items()),
+    )
+    if result.user_server:
+        table(
+            "data_servers",
+            ["uid", "server", "messages"],
+            ((str(u), srv, n) for (u, srv), n in result.user_server.items()),
+        )
+    if result.prev is not None:
+        table(
+            "data_prev",
+            ["uid", "date", "messages"],
+            ((str(u), d.isoformat(), n) for (u, d), n in result.prev.user_day.items()),
+        )
+
+
+def sheet_info(wb, F, guild_name, params, state, matrix_note, truncated, merged=False):
     wi = wb.add_worksheet("Служебное")
     wi.set_column(0, 0, 40)
     wi.set_column(1, 1, 90)
@@ -634,7 +690,8 @@ def build_xlsx(guild_name: str, params: ScanParams, state: ScanState, result: Sc
     truncated = sheet_daily(wb, F, agg, name_w)
     sheet_analytics(wb, F, agg, result, params, name_w)
     sheet_staff(wb, F, agg, result, guild_name, name_w)
-    sheet_info(wb, F, guild_name, params, state, matrix_note, truncated)
+    sheet_info(wb, F, guild_name, params, state, matrix_note, truncated, agg.merged)
+    sheet_data(wb, agg, result)
 
     wb.close()
     return buf.getvalue()
@@ -651,6 +708,10 @@ def build_report(guild_name: str, params: ScanParams, state: ScanState, result: 
         "=== ОТЧЕТ ПО СООБЩЕНИЯМ СЕРВЕРА ===",
         f"Сервер: {guild_name}",
         f"Период: {period_text(params)} (часовой пояс: {TZ_NAME})",
+        ("Схема данных", "2"),
+        ("Период: начало (ISO)", params.start_date.isoformat() if params.start_date else "нет"),
+        ("Период: конец (ISO)", params.end_date.isoformat() if params.end_date else "нет"),
+        ("Суммарный файл", "да" if merged else "нет"),
         f"Фильтры: пользователь = {params.user.display_name if params.user else 'все'}, "
         f"канал = {chan_label(params.channel) if params.channel else 'все'}",
         f"Порядок пользователей: {SORT_LABELS[params.sort_key]}; даты — по возрастанию",

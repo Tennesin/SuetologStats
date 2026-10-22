@@ -78,6 +78,7 @@ class ScanResult:
     user_day: dict = field(default_factory=lambda: defaultdict(int))      # (uid, date) -> n
     user_channel: dict = field(default_factory=lambda: defaultdict(int))  # (uid, channel_id) -> n
     heat: dict = field(default_factory=lambda: defaultdict(int))          # (weekday, hour) -> n
+    user_heat: dict = field(default_factory=lambda: defaultdict(int))     # (uid, weekday, hour) -> n
     replies: dict = field(default_factory=lambda: defaultdict(int))       # uid -> n
     names: dict = field(default_factory=dict)                             # uid -> ник
     usernames: dict = field(default_factory=dict)                         # uid -> оригинальный ник
@@ -430,6 +431,7 @@ async def scan_channels(channels, params: ScanParams, state: ScanState) -> ScanR
                     target.user_day[(uid, day)] += 1
                     target.user_channel[(uid, ch.id)] += 1
                     target.heat[(local.weekday(), local.hour)] += 1
+                    target.user_heat[(uid, local.weekday(), local.hour)] += 1
                     if m.type == discord.MessageType.reply:
                         target.replies[uid] += 1
                     main.channel_names.setdefault(ch.id, label)
@@ -505,6 +507,8 @@ def _merge_into(dst: ScanResult, src: ScanResult, server: Optional[str]):
         dst.user_channel[key] += v
     for key, v in src.heat.items():
         dst.heat[key] += v
+    for key, v in src.user_heat.items():
+        dst.user_heat[key] += v
     for uid, v in src.replies.items():
         dst.replies[uid] += v
     for uid, nm in src.names.items():
