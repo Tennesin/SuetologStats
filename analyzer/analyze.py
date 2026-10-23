@@ -18,6 +18,7 @@ from report_html import build_server_html, build_user_html
 from report_xlsx import build_summary_xlsx
 from scoring import compute_skp
 from settings import WEEKDAYS
+from avatars import fetch_avatar
 
 def describe(ds: Dataset):
     kind = "СУММАРНЫЙ ФАЙЛ" if ds.is_merged else "Сервер"
@@ -47,6 +48,23 @@ def slugify(text: str) -> str:
     return re.sub(r"[^\w\-]+", "_", text, flags=re.U).strip("_")[:60] or "report"
 
 
+_BAD_FN = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
+             *(f"LPT{i}" for i in range(1, 10))}
+
+
+def user_filename(row, uid: str, used: set) -> str:
+    """Имя файла вида «ник.html»; ID добавляется, только если такое имя уже занято."""
+    raw = str(row["username"]).strip() or str(row["name"]).strip()
+    base = _BAD_FN.sub("_", raw).strip(" .")[:60] or str(uid)
+    if base.upper() in _RESERVED:
+        base += "_"
+    if base.casefold() in used:               # Windows не различает регистр
+        base = f"{base} ({uid})"
+    used.add(base.casefold())
+    return base + ".html"
+
+
 def make_reports(ds: Dataset, out_dir: Path, args):
     """Строит HTML (серверный + индивидуальные). Возвращает (папка, данные для сводного xlsx)."""
     sm = server_metrics(ds)
@@ -56,14 +74,17 @@ def make_reports(ds: Dataset, out_dir: Path, args):
     folder = out_dir / slugify(ds.path.stem)
     (folder / "users").mkdir(parents=True, exist_ok=True)
 
-    linked = set()
+    linked = {}
     if len(sk):
         days = calendar_days(ds)
         chosen = sk[sk["selected"]].head(args.max_individual).index
+        used = set()
         for uid in chosen:
-            html_text = build_user_html(ds, uid, um, sk, days)
-            (folder / "users" / f"{uid}.html").write_text(html_text, encoding="utf-8")
-            linked.add(uid)
+            fname = user_filename(um.loc[uid], uid, used)
+            avatar = None if args.no_avatars else fetch_avatar(str(um.loc[uid, "avatar"]))
+            html_text = build_user_html(ds, uid, um, sk, days, avatar)
+            (folder / "users" / fname).write_text(html_text, encoding="utf-8")
+            linked[uid] = fname
     (folder / "report.html").write_text(build_server_html(ds, sm, um, sk, linked), encoding="utf-8")
     return folder, {"ds": ds, "sm": sm, "um": um, "sk": sk}
 
@@ -77,6 +98,8 @@ def main() -> int:
     ap.add_argument("--top", type=int, default=10, help="сколько пользователей показать в топе (0 — не показывать)")
     ap.add_argument("--out", help="куда сохранять отчёты (по умолчанию — папка analysis рядом с xlsx)")
     ap.add_argument("--no-reports", action="store_true", help="только сводка в терминале, без HTML и xlsx")
+    ap.add_argument("--no-avatars", action="store_true",
+                    help="не скачивать аватарки (отчёты строятся без интернета)")
     ap.add_argument("--top-n", type=int, default=S.SELECT_TOP_N,
                     help="сколько лучших по СКП получают индивидуальный отчёт")
     ap.add_argument("--min-skp", type=float, default=S.SELECT_MIN_SKP,

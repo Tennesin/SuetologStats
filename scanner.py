@@ -82,6 +82,7 @@ class ScanResult:
     replies: dict = field(default_factory=lambda: defaultdict(int))       # uid -> n
     names: dict = field(default_factory=dict)                             # uid -> ник
     usernames: dict = field(default_factory=dict)                         # uid -> оригинальный ник
+    avatars: dict = field(default_factory=dict)                           # uid -> URL аватарки
     merged: bool = False                                                  # True у суммарного результата
     channel_names: dict = field(default_factory=dict)                     # channel_id -> название
     user_server: dict = field(default_factory=lambda: defaultdict(int))   # (uid, сервер) -> n (только в сумме)
@@ -440,6 +441,7 @@ async def scan_channels(channels, params: ScanParams, state: ScanState) -> ScanR
                         name_ts[uid] = m.created_at
                         main.names[uid] = author.display_name
                         main.usernames[uid] = author.name
+                        main.avatars[uid] = author.display_avatar.url
                     if target is main:
                         state.counted += 1
             except discord.Forbidden:
@@ -512,7 +514,11 @@ def _merge_into(dst: ScanResult, src: ScanResult, server: Optional[str]):
     for uid, v in src.replies.items():
         dst.replies[uid] += v
     for uid, nm in src.names.items():
-        dst.names.setdefault(uid, nm)          # ник — с первого сервера, где он встретился
+        dst.names.setdefault(uid, nm)
+    for uid, un in src.usernames.items():
+        dst.usernames.setdefault(uid, un)
+    for uid, url in src.avatars.items():
+        dst.avatars.setdefault(uid, url)
     if server is not None:
         for cid, label in src.channel_names.items():
             dst.channel_names[cid] = f"[{server}] {label}"

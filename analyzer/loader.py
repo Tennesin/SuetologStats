@@ -12,7 +12,7 @@ from openpyxl import load_workbook
 
 import settings as S
 
-USER_COLS = ["uid", "name", "username", "n", "replies", "role"]
+USER_COLS = ["uid", "name", "username", "n", "replies", "role", "avatar"]
 DAILY_COLS = ["uid", "date", "n"]
 CHANNEL_COLS = ["uid", "channel_id", "channel", "n"]
 HEAT_COLS = ["uid", "weekday", "hour", "n"]
@@ -280,7 +280,8 @@ def _build(wb, path: Path) -> Dataset:
     if full:
         users = _df([
             (_uid(r.get("uid")), _s(r.get("name")), _s(r.get("username")),
-             _to_int(r.get("messages")), _to_int(r.get("replies")), _s(r.get("role")))
+             _to_int(r.get("messages")), _to_int(r.get("replies")), _s(r.get("role")),
+             _s(r.get("avatar")))
             for r in _table(wb, S.SHEET_DATA_USERS) if _uid(r.get("uid"))
         ], USER_COLS)
         channels = _df([
@@ -298,7 +299,7 @@ def _build(wb, path: Path) -> Dataset:
         for r in summary:
             mt = re.match(r"^(.*) \[([^\]]*)\]$", r["display"])
             name, uname = (mt.group(1), mt.group(2)) if mt else (r["display"], "")
-            rows.append((r["uid"], name, uname, r["n"], 0, r["role"]))
+            rows.append((r["uid"], name, uname, r["n"], 0, r["role"], ""))
         users = _df(rows, USER_COLS)
         channels = _df([], CHANNEL_COLS)
         heat = _df([], HEAT_COLS)

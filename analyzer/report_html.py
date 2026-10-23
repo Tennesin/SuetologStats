@@ -2,6 +2,7 @@
 
 import html
 from datetime import datetime
+from urllib.parse import quote
 
 import numpy as np
 
@@ -37,6 +38,11 @@ a{color:var(--accent)}
 ul{margin:6px 0 6px 20px;padding:0}
 details{margin:14px 0}
 summary{cursor:pointer;font-weight:600}
+.head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:8px}
+.avatar{width:96px;height:96px;border-radius:50%;object-fit:cover;margin:0;flex:none;border:2px solid var(--line);background:#fff}
+.avatar.ph{display:flex;align-items:center;justify-content:center;background:var(--accent);color:#fff;font-size:42px;font-weight:700}
+.spec{border-left:4px solid var(--accent)}
+.spec p{margin:6px 0 0}
 """
 
 _REL_CLASS = {"высокая": "hi", "средняя": "mid", "низкая": "lo"}
@@ -120,7 +126,7 @@ def page(title: str, body: str) -> str:
 
 def _link(uid, name, linked, prefix: str = "users/"):
     if uid in linked:
-        return Raw(f'<a href="{prefix}{esc(uid)}.html">{esc(name)}</a>')
+        return Raw(f'<a href="{prefix}{quote(linked[uid])}">{esc(name)}</a>')
     return name
 
 
@@ -341,15 +347,27 @@ def _explain(ds, um, uid, r, D) -> dict:
     }
 
 
-def build_user_html(ds, uid, um, sk, days) -> str:
+def build_user_html(ds, uid, um, sk, days, avatar=None) -> str:
     r, s = um.loc[uid], sk.loc[uid]
     D = len(days)
     W = S.SKP_WEIGHTS
-    b = ['<p class="muted"><a href="../report.html">← к отчёту по серверу</a></p>',
-         f"<h1>{esc(r['name'])}</h1>"]
+    b = ['<p class="muted"><a href="../report.html">← к отчёту по серверу</a></p>']
     sub = [x for x in (f"@{r['username']}" if r["username"] else "", f"ID {uid}", r["role"],
                        ds.title, ds.period_text) if x]
-    b.append(f'<p class="muted">{esc(" · ".join(sub))}</p>')
+
+    if avatar:
+        av = f'<img class="avatar" alt="" src="{avatar}">'
+    else:
+        letter = (str(r["name"]).strip() or "?")[0].upper()
+        av = f'<div class="avatar ph">{esc(letter)}</div>'
+    b.append(f'<div class="head"><div><h1>{esc(r["name"])}</h1>'
+             f'<p class="muted">{esc(" · ".join(sub))}</p></div>{av}</div>')
+
+    # Особая информация (заполняется вручную в settings.SPEC_INFO)
+    spec = S.SPEC_INFO_BY_ID.get(str(uid))
+    if spec:
+        spec_html = esc(spec).replace(chr(10), "<br>")
+        b.append(f'<div class="box spec"><b>Особая информация</b><p>{spec_html}</p></div>')
 
     lvl = r["reliability"]
     box = f"<b>Достоверность выводов:</b> {badge(lvl)}"

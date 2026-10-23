@@ -340,6 +340,7 @@ def user_metrics(ds: Dataset) -> pd.DataFrame:
     name = info["name"].reindex(uids).fillna("")
     df["name"] = np.where(name.values == "", uids.values, name.values)
     df["username"] = info["username"].reindex(uids).fillna("").values
+    df["avatar"] = info["avatar"].reindex(uids).fillna("").values
     df["role"] = info["role"].reindex(uids).fillna("").values
     rep = info["replies"].reindex(uids).fillna(0).values.astype(int)
     df["replies"] = rep

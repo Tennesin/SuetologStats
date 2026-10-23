@@ -588,9 +588,10 @@ def sheet_data(wb, agg: Agg, result: ScanResult):
 
     table(
         "data_users",
-        ["uid", "name", "username", "messages", "replies", "role"],
+        ["uid", "name", "username", "messages", "replies", "role", "avatar"],
         ((str(u), agg.names.get(u, str(u)), agg.usernames.get(u, ""),
-          agg.totals.get(u, 0), result.replies.get(u, 0), agg.role_of(u))
+          agg.totals.get(u, 0), result.replies.get(u, 0), agg.role_of(u),
+          result.avatars.get(u, ""))
          for u in [*agg.order, *extra]),
     )
     table(
