@@ -196,8 +196,14 @@ def server_metrics(ds: Dataset) -> dict:
     out["time"] = _time_block(ds)
 
     # Жизненный цикл
-    nbw = g["min"].dt.to_period("W").value_counts().sort_index()
-    life = {"new_by_week": {p.start_time.date(): int(v) for p, v in nbw.items()}}
+    first_seen = g["min"]
+    from_start = int((first_seen == days[0]).sum())
+    later = first_seen[first_seen > days[0]]
+    nbw = later.dt.to_period("W").value_counts().sort_index()
+    life = {
+        "from_start": from_start,
+        "new_by_week": {p.start_time.date(): int(v) for p, v in nbw.items()},
+    }
     if D >= MIN_TREND_DAYS:
         half = days[D // 2]
         early = set(daily.loc[daily["date"] < half, "uid"])

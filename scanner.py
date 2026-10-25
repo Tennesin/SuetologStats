@@ -7,7 +7,7 @@ import re
 import time
 from collections import defaultdict
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from datetime import time as dtime
 from typing import Optional
@@ -15,8 +15,8 @@ from typing import Optional
 import discord
 
 from config import (
-    ADMIN_ROLES, CONCURRENCY, EXCLUDE_FILE, IGNORED_CHATS, PROGRESS_INTERVAL, TZ,
-    fmt_duration, fmt_list, fmt_num, log,
+    ADMIN_ROLES, CONCURRENCY, DATE_FMT, EXCLUDE_FILE, GUILD_START_DATES, IGNORED_CHATS,
+    MIN_START_DATE, PROGRESS_INTERVAL, TZ, fmt_duration, fmt_list, fmt_num, log,
 )
 
 # Считаем только обычные сообщения и ответы; системные и сообщения ботов не учитываются.
@@ -139,6 +139,41 @@ def period_bounds(params: ScanParams):
         if params.end_date else None
     )
     return start_dt, end_dt
+
+
+def guild_start_date(guild: discord.Guild) -> date:
+    """Первый день, с которого у сервера есть осмысленная история."""
+    override = GUILD_START_DATES.get(guild.id)
+    if override:
+        return override
+    return max(MIN_START_DATE, guild.created_at.astimezone(TZ).date())
+
+
+def params_for_guild(guild: discord.Guild, params: ScanParams,
+                     state: ScanState) -> Optional[ScanParams]:
+    """Копия параметров с началом периода, подрезанным под историю сервера.
+    None — в выбранном периоде у сервера истории нет (читать нечего).
+    Пояснения пишутся в state.notes и попадают в лист «Служебное»."""
+    g_start = guild_start_date(guild)
+    s, e = params.start_date, params.end_date
+    if e and e < g_start:
+        return None
+    new_s = max(s, g_start) if s else g_start
+    if s and new_s != s:
+        state.notes.append(
+            f"История сервера начинается с {g_start.strftime(DATE_FMT)}: период сокращён "
+            f"(запрошено с {s.strftime(DATE_FMT)})."
+        )
+    compare = params.compare
+    if compare and e:
+        length = (e - new_s).days + 1
+        if new_s - timedelta(days=length) < g_start:
+            compare = False
+            state.notes.append(
+                "Сравнение с предыдущим периодом отключено: он начался бы раньше "
+                f"начала истории сервера ({g_start.strftime(DATE_FMT)})."
+            )
+    return replace(params, start_date=new_s, compare=compare)
 
 
 # ---------- Правила исключения чатов ----------

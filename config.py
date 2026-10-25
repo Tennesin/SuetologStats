@@ -48,8 +48,14 @@ EXCLUDE_FILE = os.environ.get("EXCLUDE_FILE") or os.path.join(
 )
 
 DATE_FMT = "%d.%m.%Y"
-# Сервер «Суетологи» запущен 27.09.2026 — раньше этой даты искать нечего.
+# Глобальный нижний предел: раньше этой даты не читаем ни один сервер.
 MIN_START_DATE = date(2026, 9, 27)
+# Официальный день запуска конкретных серверов: {ID сервера: дата}.
+GUILD_START_DATES = {
+    1548361478103638068: date(2026, 9, 27),   # Суетологи: официальный запуск
+    1561089081264316570: date(2026, 10, 18),  # Комитет: официальный запуск
+}
+
 NAME_WIDTH = 48
 PROGRESS_INTERVAL = 15              # секунд между обновлениями прогресса
 UPLOAD_LIMIT = 9 * 1024 * 1024      # с запасом под лимит вложения Discord (10 МБ)
@@ -245,9 +251,11 @@ def resolve_period(text: str, today: Optional[date] = None):
 def build_period(period: Optional[str], start_text: Optional[str],
                  end_text: Optional[str], compare: bool = False):
     """Единая точка разбора периода для /stats и терминала.
-    Возвращает (start, end, key, label). Бросает ValueError."""
+    Возвращает (start, end, key, label). Бросает ValueError.
+    Конец периода всегда не позже вчерашнего дня: текущие сутки не завершены."""
     if period and (start_text or end_text):
         raise ValueError("Укажите либо пресет периода, либо даты начала/конца — не одновременно.")
+    yday = today_local() - timedelta(days=1)
     if period:
         s, e, key, label = resolve_period(period)
     else:
@@ -261,18 +269,26 @@ def build_period(period: Optional[str], start_text: Optional[str],
             e = parse_date(end_text)
             if e is None:
                 raise ValueError("Неверный формат даты конца. Используйте дд.мм.гггг")
-        if s and e and s > e:
-            raise ValueError("Дата начала позже даты конца.")
-    if e and e < MIN_START_DATE:
+            if e > yday:
+                raise ValueError(
+                    f"Дата конца не может быть позже вчерашней ({yday.strftime(DATE_FMT)}): "
+                    "текущие сутки ещё не завершены."
+                )
+        else:
+            e = yday                    # конец не задан -> последние завершённые сутки
+        if s and s > e:
+            raise ValueError(
+                "Дата начала позже даты конца." if end_text else
+                f"Дата начала позже последних завершённых суток ({yday.strftime(DATE_FMT)})."
+            )
+    if e < MIN_START_DATE:
         raise ValueError(
-            f"Период целиком раньше запуска сервера ({MIN_START_DATE.strftime(DATE_FMT)}) — "
-            "там нет данных."
+            f"Период целиком раньше запуска сервера ({MIN_START_DATE.strftime(DATE_FMT)}) "
+            "или в нём ещё нет завершённых суток — данных нет."
         )
     if s is None or s < MIN_START_DATE:
         s = MIN_START_DATE          # «с начала истории» и слишком ранние даты подрезаются
 
-    if compare and not (s and e):
-        raise ValueError("Для сравнения нужен ограниченный период: пресет или обе даты.")
     if compare:
         length = (e - s).days + 1
         if s - timedelta(days=length) < MIN_START_DATE:

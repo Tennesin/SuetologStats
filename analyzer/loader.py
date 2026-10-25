@@ -263,6 +263,13 @@ def _build(wb, path: Path) -> Dataset:
         found = [_to_date(x) for x in re.findall(r"\d{2}\.\d{2}\.\d{4}", meta.get("Период", ""))]
         if len(found) >= 2 and all(found[:2]):
             d_start, d_end = found[0], found[1]
+    gen_date = _to_gen_date(meta.get("Сформирован"))
+    last_day = d_end or data_end
+    if gen_date and last_day and last_day >= gen_date:
+        warnings.append(
+            f"Последний день окна ({last_day}) совпадает с днём формирования отчёта и мог быть "
+            "неполным: «давность», серии и тренд искажены. Пересоберите отчёт обновлённым ботом."
+        )
 
     attention = multi.get("⚠ Внимание", [])
     incomplete = any("НЕПОЛНЫЕ" in a for a in attention)

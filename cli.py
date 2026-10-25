@@ -7,16 +7,18 @@ import sys
 import threading
 import time
 from datetime import datetime
+from dataclasses import replace
 
 import discord
 
 from config import (
     DETAIL_LABELS, SORT_LABELS, STATS_DIR, build_period, fmt_duration, fmt_num,
-    log, safe_filename, save_local_copy,
+    log, safe_filename, save_local_copy, DATE_FMT,
 )
 from reports import build_xlsx, period_text
 from scanner import (
     ScanParams, ScanState, background_tasks, merge_results, running, scan_guild,
+    guild_start_date, params_for_guild, guild_start_date, params_for_guild,
 )
 
 CLI_HELP = """
@@ -34,7 +36,8 @@ CLI_HELP = """
   --start дд.мм.гггг, --end дд.мм.гггг   — свои даты (вместо пресета)
   --compare          сравнить с предыдущим периодом такой же длины (читает вдвое больше)
   --exclude "чат1,чат2"   --detail days|weeks|months|auto   --sort count|name
-В пресетах учитываются только завершённые сутки (последний день — вчера).
+Во всех режимах, включая заданные вручную даты и отсутствие конца, 
+учитываются только завершённые сутки (последний день — вчера).
 """
 
 VALUE_OPTS = {"period", "last", "start", "end", "exclude", "detail", "sort"}
@@ -109,6 +112,7 @@ async def run_batch(bot: discord.Client, guilds: list[discord.Guild], params: Sc
     folder = os.path.abspath(os.path.join(
         STATS_DIR or "output", f"stats_{period_slug(params)}_{stamp}"))
     results = []
+    used_params = []
     try:
         await asyncio.to_thread(os.makedirs, folder, exist_ok=True)
         for i, g in enumerate(guilds, start=1):
@@ -117,24 +121,38 @@ async def run_batch(bot: discord.Client, guilds: list[discord.Guild], params: Sc
             if g.id in running:
                 print(f"⚠ Сервер «{g.name}» уже сканируется через /stats — пропускаю.", flush=True)
                 continue
-            print(f"▶ [{i}/{len(guilds)}] Сервер «{g.name}» ({g.id})", flush=True)
             state = ScanState(title=g.name)
+            g_params = params_for_guild(g, params, state)
+            if g_params is None:
+                print(f"⚠ Сервер «{g.name}»: в выбранном периоде у него нет истории "
+                      f"(начало — {guild_start_date(g).strftime(DATE_FMT)}) — пропускаю.", flush=True)
+                continue
+            print(f"▶ [{i}/{len(guilds)}] Сервер «{g.name}» ({g.id})", flush=True)
+            if g_params.start_date != params.start_date:
+                print(f"  Период сокращён до начала истории сервера: с "
+                      f"{g_params.start_date.strftime(DATE_FMT)}", flush=True)
             running[g.id] = state
             try:
-                result = await scan_guild(g, params, bot.user.id, state)
+                result = await scan_guild(g, g_params, bot.user.id, state)
             finally:
                 state.done = True
                 running.pop(g.id, None)
-            data = await asyncio.to_thread(build_xlsx, g.name, params, state, result)
+            data = await asyncio.to_thread(build_xlsx, g.name, g_params, state, result)
             fname = f"{safe_filename(g.name)} ({g.id}).xlsx"
             await asyncio.to_thread(save_local_copy, fname, data, folder)
             results.append((g, state, result))
+            used_params.append(g_params)
             print(f"✔ Сохранено: {fname} (учтено сообщений: {fmt_num(state.counted)})", flush=True)
 
         if len(results) > 1:
             merged, total = merge_results(results)
+            m_params = replace(
+                params,
+                start_date=min(p.start_date for p in used_params),   # объединение историй
+                compare=merged.prev is not None,
+            )
             pseudo_name = f"Суммарно по серверам: {len(results)}"
-            data = await asyncio.to_thread(build_xlsx, pseudo_name, params, total, merged)
+            data = await asyncio.to_thread(build_xlsx, pseudo_name, m_params, total, merged)
             await asyncio.to_thread(save_local_copy, "Суммарная статистика.xlsx", data, folder)
             print("✔ Сохранено: Суммарная статистика.xlsx", flush=True)
 

@@ -1,7 +1,7 @@
 """Этап 5: HTML-отчёты (один файл, картинки вшиты в base64)."""
 
 import html
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import quote
 
 import numpy as np
@@ -129,6 +129,16 @@ def _link(uid, name, linked, prefix: str = "users/"):
         return Raw(f'<a href="{prefix}{quote(linked[uid])}">{esc(name)}</a>')
     return name
 
+def _week_range(monday, ds) -> str:
+    """Подпись недели: границы подрезаны по окну анализа, например «27.09 – 27.09»."""
+    start, end = monday, monday + timedelta(days=6)
+    a, b = ds.window
+    if a and start < a:
+        start = a
+    if b and end > b:
+        end = b
+    return f"{start:%d.%m} – {end:%d.%m}"
+
 
 def method_html() -> str:
     W = S.SKP_WEIGHTS
@@ -201,11 +211,13 @@ def build_server_html(ds, sm, um, sk, linked) -> str:
                  f"{pct(tr['change'], True)} (в среднем в день {num(tr['first_half_avg'], 1)} → "
                  f"{num(tr['second_half_avg'], 1)}).</p>")
         b.append(img(C.chart_weekdays(tr["weekday_avg"]), "По дням недели"))
-        rows = [[wk.strftime("%d.%m.%Y"), int(r["messages"]), int(r["days"])]
+        rows = [[_week_range(wk, ds), int(r["messages"]), int(r["days"]),
+                 num(r["messages"] / r["days"], 1)]
                 for wk, r in tr["weekly"].iterrows()]
-        b.append("<p class=\"muted\">По неделям (с понедельника). Неполные недели по краям окна "
-                 "с полными не сопоставимы.</p>")
-        b.append(table(["Неделя с", "Сообщений", "Дней в окне"], rows, num_cols=(1, 2)))
+        b.append('<p class="muted">По неделям (границы подрезаны по окну анализа). Первая и последняя '
+                 "недели могут быть неполными, поэтому сравнивайте их по колонке «В среднем в день».</p>")
+        b.append(table(["Период", "Сообщений", "Дней", "В среднем в день"], rows,
+                       num_cols=(1, 2, 3)))
     else:
         b.append(f"<p class=\"muted\">{esc(tr['rel']['notes'][0])}</p>")
 
@@ -259,15 +271,17 @@ def build_server_html(ds, sm, um, sk, linked) -> str:
     lc = sm["lifecycle"]
     b.append(h2("Жизненный цикл", lc["rel"]))
     items = [f"Притихли (нет сообщений последние {M.DORMANT_DAYS} дн. окна): {lc['dormant']} чел. ({pct(lc['dormant_share'])})."]
+    items.append(f"Писали уже в первый день окна ({ds.window[0]}): {lc['from_start']} чел. "
+                 "Это стартовая аудитория, а не приток новых.")
     if "retained" in lc:
         items.append(f"Писали в обеих половинах окна: {lc['retained']} чел.; только в первой: {lc['lost']}; "
                      f"только во второй: {lc['new_second_half']}; удержание: {pct(lc.get('retention'))}.")
     b.append(ul(items))
     b.append(ul(lc["rel"]["notes"]))
     if lc["new_by_week"]:
-        b.append("<p class=\"muted\">Первое сообщение в окне, по неделям:</p>")
-        b.append(table(["Неделя с", "Впервые написали"],
-                       [[wk.strftime("%d.%m.%Y"), v] for wk, v in sorted(lc["new_by_week"].items())],
+        b.append("<p class=\"muted\">Впервые написали после первого дня окна, по неделям:</p>")
+        b.append(table(["Период", "Впервые написали"],
+                       [[_week_range(wk, ds), v] for wk, v in sorted(lc["new_by_week"].items())],
                        num_cols=(1,)))
 
     cp = sm["compare"]
