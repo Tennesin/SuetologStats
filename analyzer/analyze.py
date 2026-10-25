@@ -13,7 +13,7 @@ from pathlib import Path
 
 import settings as S
 from loader import Dataset, LoaderError, discover, load_dataset
-from metrics import calendar_days, server_metrics, user_metrics
+from metrics import TREND_WINDOW, calendar_days, server_metrics, user_metrics
 from report_html import build_server_html, build_user_html
 from report_xlsx import build_summary_xlsx
 from scoring import compute_skp
@@ -181,7 +181,8 @@ def show_metrics(ds: Dataset, top: int):
 
     tr = sm["trend"]
     if tr["available"]:
-        print(f"  Тренд: {tr['direction']} (вторая половина к первой: {_pct(tr['change'])}) "
+        print(f"  Тренд: {tr['direction']} (последние {TREND_WINDOW} дн. к предыдущим: "
+              f"{_pct(tr['recent_change'])}; вторая половина к первой: {_pct(tr['change'])}) "
               f"[достоверность: {tr['rel']['level']}]")
     else:
         print(f"  Тренд: не оценивается ({tr['rel']['notes'][0]})")

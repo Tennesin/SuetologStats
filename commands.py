@@ -209,6 +209,14 @@ async def stats(
     )
 
     state = ScanState(title=guild.name)
+    params = params_for_guild(guild, params, state)
+    if params is None:
+        await interaction.followup.send(
+            "В выбранном периоде у этого сервера нет истории: она начинается с "
+            f"{guild_start_date(guild).strftime('%d.%m.%Y')}.",
+            ephemeral=True,
+        )
+        return
     running[guild.id] = state
     try:
         status_msg = None

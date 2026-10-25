@@ -139,6 +139,39 @@ def _week_range(monday, ds) -> str:
         end = b
     return f"{start:%d.%m} – {end:%d.%m}"
 
+def _trend_lines(tr) -> list:
+    pk, w = tr["peak"], tr["window"]
+    lines = [
+        f"Последние {w} дн.: {num(tr['last_avg'], 1)} в день; предыдущие {w} дн.: "
+        f"{num(tr['prev_avg'], 1)} ({pct(tr['recent_change'], True)}).",
+        f"Вторая половина окна к первой: {pct(tr['change'], True)} "
+        f"(в среднем в день {num(tr['first_half_avg'], 1)} → {num(tr['second_half_avg'], 1)}).",
+        f"Самая активная неделя: {pk['start']:%d.%m} – {pk['end']:%d.%m}, "
+        f"{num(pk['avg'], 1)} в день, {pct(pk['share'])} всех сообщений окна.",
+    ]
+    if tr["direction"] == "всплеск и спад":
+        fw = tr["first_week_avg"]
+        lines.append(
+            "Сравнение половин здесь вводит в заблуждение: его определяет эта неделя. "
+            f"Последняя неделя в {pk['avg'] / max(tr['last_avg'], 1e-9):.1f} раза ниже пика"
+            + (f" и составляет {pct(tr['last_avg'] / fw)} от уровня первой недели ({num(fw, 1)} в день)."
+               if fw > 0 else ".")
+            + " Устойчивого роста нет.")
+    elif tr["direction"] == "неоднозначно":
+        lines.append("Сигналы разных периодов противоположны: делать вывод о направлении рано.")
+    return lines
+
+
+def _trend_hint(r) -> str:
+    t = r["trend"]
+    if t == "пачками":
+        return f"3 дня дали {pct(r['burst_share'])} сообщений"
+    if t in ("растёт", "снижается", "стабильно"):
+        return f"{int(r['recent_n'])} против {int(r['prev_n'])} за {int(r['trend_window'])} дн."
+    if t == "притих":
+        return f"нет сообщений {int(r['days_since_last'])} дн."
+    return ""
+
 
 def method_html() -> str:
     W = S.SKP_WEIGHTS
@@ -207,9 +240,8 @@ def build_server_html(ds, sm, um, sk, linked) -> str:
     b.append(img(C.chart_timeline(sm["series"]), "Сообщения по дням"))
     b.append(img(C.chart_dau(sm["series"]), "DAU"))
     if tr["available"]:
-        b.append(f"<p>Тренд: <b>{esc(tr['direction'])}</b>. Вторая половина окна к первой: "
-                 f"{pct(tr['change'], True)} (в среднем в день {num(tr['first_half_avg'], 1)} → "
-                 f"{num(tr['second_half_avg'], 1)}).</p>")
+        b.append(f"<p>Тренд: <b>{esc(tr['direction'])}</b>.</p>")
+        b.append(ul(_trend_lines(tr)))
         b.append(img(C.chart_weekdays(tr["weekday_avg"]), "По дням недели"))
         rows = [[_week_range(wk, ds), int(r["messages"]), int(r["days"]),
                  num(r["messages"] / r["days"], 1)]
@@ -387,6 +419,9 @@ def build_user_html(ds, uid, um, sk, days, avatar=None) -> str:
     box = f"<b>Достоверность выводов:</b> {badge(lvl)}"
     if lvl == "низкая":
         box += "<br>Данных об этом человеке мало (сообщений или активных дней): оценки ниже ориентировочные."
+    if r["burst_share"] >= M.BURST_TOP3_SHARE and r["active_days"] >= M.MIN_USER_ACTIVE_DAYS_TREND:
+        box += (f"<br>Активность пачками: три самых активных дня дали {pct(r['burst_share'])} "
+                "сообщений, поэтому выводы о динамике и привычном времени ориентировочные.")
     if ds.incomplete:
         box += "<br>Сбор данных был остановлен вручную: все цифры неполные."
     if ds.filtered:
@@ -402,7 +437,7 @@ def build_user_html(ds, uid, um, sk, days, avatar=None) -> str:
         card("Серия подряд", f"{int(r['longest_streak'])} дн.", f"сейчас {int(r['current_streak'])}"),
         card("Недель активно", int(r["weeks_active"]), pct(r["weeks_share"])),
         card("Последнее сообщение", str(r["last_date"]), f"{int(r['days_since_last'])} дн. до конца окна"),
-        card("Тренд", r["trend"]),
+        card("Тренд", r["trend"], _trend_hint(r)),
     ]
     if ds.full_data:
         cards.append(card("Ответы", pct(r["reply_share"]), f"{int(r['replies'])} шт."))
@@ -442,9 +477,11 @@ def build_user_html(ds, uid, um, sk, days, avatar=None) -> str:
     b.append(img(C.chart_user_days(mine, r["name"]), "Сообщения по дням"))
     b.append(img(C.chart_user_hours(ds, uid), "Профиль по часам"))
     if not _bad(r["peak_hour"]):
-        b.append(f"<p>Чаще всего пишет около {int(r['peak_hour']):02d}:00, в день недели "
-                 f"{S.WEEKDAYS[int(r['peak_weekday'])]}; ночью — {pct(r['night_share'])}, "
-                 f"в выходные — {pct(r['weekend_share'])} (часовой пояс {esc(ds.tz or '—')}).</p>")
+        wd = ("" if _bad(r["peak_weekday"])
+              else f", чаще всего в день недели {S.WEEKDAYS[int(r['peak_weekday'])]}")
+        b.append(f"<p>Чаще всего пишет около {int(r['peak_hour']):02d}:00{wd}; "
+                 f"ночью — {pct(r['night_share'])}, в выходные — {pct(r['weekend_share'])} "
+                 f"(часовой пояс {esc(ds.tz or '—')}).</p>")
 
     # Каналы
     chn = ds.channels

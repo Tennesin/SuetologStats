@@ -14,7 +14,14 @@ MIN_TREND_DAYS = 14        # меньше — тренды не считаем
 MIN_USER_MSGS_TREND = 20   # меньше сообщений — тренд пользователя не оцениваем
 TREND_UP = 1.3
 TREND_DOWN = 0.7
-
+MIN_USER_ACTIVE_DAYS_TREND = 5   # меньше активных дней — тренд пользователя не оцениваем
+BURST_TOP3_SHARE = 0.6           # «пачками»: 3 самых активных дня дают ≥ 60% сообщений
+TREND_WINDOW = 7                 # «недавняя» динамика сервера: последние N дней к предыдущим N
+PEAK_RATIO = 1.5                 # самая активная неделя выше первой недели в ≥ N раз
+DECAY_RATIO = 0.6                # и последняя неделя ≤ N × пик -> «всплеск и спад»
+HEAVY_WEEK_FACTOR = 1.6          # неделя «перетягивает» окно, если её доля ≥ N × (7 / длина окна)
+CHANGE_EPS = 0.15                # изменение меньше ±15% считается «стабильно»
+CHANGE_MIXED = 0.30              # противоположные сигналы слабее ±30% не считаются противоречием
 
 # ---------- Вспомогательное ----------
 
@@ -26,6 +33,13 @@ def make_rel(level: int, notes: list) -> dict:
     level = max(0, min(2, int(level)))
     return {"level": LEVELS[level], "notes": notes}
 
+def _cap(rel: dict, cap_level: int) -> dict:
+    """Не даёт достоверности раздела превысить общий уровень."""
+    return make_rel(min(LEVELS.index(rel["level"]), cap_level), rel["notes"])
+
+
+def _sign(x, th: float = CHANGE_EPS) -> int:
+    return 1 if x > th else -1 if x < -th else 0
 
 def calendar_days(ds: Dataset) -> pd.DatetimeIndex:
     """Все календарные дни окна анализа (заявленный период, расширенный фактическими данными)."""
@@ -76,31 +90,59 @@ def base_reliability(ds: Dataset, days_n: int, users_n: int) -> dict:
 
 def _trend_block(tot: pd.Series, D: int) -> dict:
     if D < MIN_TREND_DAYS:
-        return {"available": False, "rel": make_rel(0, [f"окно {D} дн. < {MIN_TREND_DAYS}: тренд не оценивается"])}
+        return {"available": False,
+                "rel": make_rel(0, [f"окно {D} дн. < {MIN_TREND_DAYS}: тренд не оценивается"])}
+    v = tot.values.astype(float)
+    total = float(v.sum())
+    w = TREND_WINDOW
     h = D // 2
-    first, second = float(tot.iloc[:h].mean()), float(tot.iloc[h:].mean())
-    change = (second / first - 1) if first > 0 else None
-    mean = float(tot.mean())
-    slope = float(np.polyfit(np.arange(D), tot.values.astype(float), 1)[0])
-    if change is None:
+    first, second = float(v[:h].mean()), float(v[h:].mean())
+    half_change = (second / first - 1) if first > 0 else None
+
+    last_avg, prev_avg = float(v[-w:].mean()), float(v[-2 * w:-w].mean())
+    recent_change = (last_avg / prev_avg - 1) if prev_avg > 0 else None
+    first_week_avg = float(v[:w].mean())
+
+    # самая активная неделя (скользящее окно в w дней)
+    roll = np.convolve(v, np.ones(w), mode="valid")
+    k = int(roll.argmax())
+    peak = {"start": tot.index[k].date(), "end": tot.index[k + w - 1].date(),
+            "avg": float(roll[k] / w), "share": float(roll[k] / total) if total else 0.0}
+    peak_passed = (peak["avg"] >= PEAK_RATIO * max(first_week_avg, 1e-9)
+                   and last_avg <= DECAY_RATIO * peak["avg"])
+    heavy = D >= 3 * w and peak["share"] >= HEAVY_WEEK_FACTOR * w / D
+
+    if peak_passed:
+        direction = "всплеск и спад"
+    elif recent_change is None or half_change is None:
         direction = "н/д"
-    elif change > 0.15:
-        direction = "рост"
-    elif change < -0.15:
-        direction = "спад"
     else:
-        direction = "стабильно"
+        a, b = _sign(recent_change), _sign(half_change)
+        if a * b == -1 and max(abs(recent_change), abs(half_change)) >= CHANGE_MIXED:
+            direction = "неоднозначно"          # сигналы противоположны
+        else:
+            direction = {1: "рост", -1: "спад", 0: "стабильно"}[b]
+
     wk = tot.groupby(tot.index.to_period("W")).agg(["sum", "count"])
     wk.index = [p.start_time.date() for p in wk.index]
     wk.columns = ["messages", "days"]
     wd = tot.groupby(tot.index.weekday).mean().reindex(range(7)).fillna(0.0)
-    notes = ["неполные недели по краям окна не сопоставимы с полными (см. колонку days)"]
+
+    notes = ["неполные недели по краям окна не сопоставимы с полными (см. колонку «Дней»)"]
+    level = _lvl(D, 21, 42)
+    if D < 42:
+        notes.append(f"окно {D} дн. ({D // w} полных недель): для устойчивого тренда нужно хотя бы 6 недель")
+    if heavy or direction in ("всплеск и спад", "неоднозначно"):
+        level = min(level, 1)
+        notes.append(f"одна неделя дала {peak['share'] * 100:.0f}% сообщений окна: "
+                     "направление определяется всплеском")
     return {
-        "available": True, "direction": direction, "change": change,
+        "available": True, "direction": direction, "change": half_change,
         "first_half_avg": first, "second_half_avg": second,
-        "slope_rel": (slope / mean) if mean > 0 else None,
-        "weekly": wk, "weekday_avg": [float(v) for v in wd.values],
-        "rel": make_rel(_lvl(D, 14, 28), notes),
+        "window": w, "last_avg": last_avg, "prev_avg": prev_avg, "recent_change": recent_change,
+        "first_week_avg": first_week_avg, "peak": peak, "heavy": heavy,
+        "weekly": wk, "weekday_avg": [float(x) for x in wd.values],
+        "rel": make_rel(level, notes),
     }
 
 
@@ -197,7 +239,7 @@ def server_metrics(ds: Dataset) -> dict:
 
     # Жизненный цикл
     first_seen = g["min"]
-    from_start = int((first_seen == days[0]).sum())
+    from_start = int((first_seen == days[0]).sum())       # писали уже в первый день окна
     later = first_seen[first_seen > days[0]]
     nbw = later.dt.to_period("W").value_counts().sort_index()
     life = {
@@ -271,6 +313,12 @@ def server_metrics(ds: Dataset) -> dict:
             "share": sm / total_msgs if total_msgs else 0.0,
             "by_kind": {k: int(v) for k, v in ds.staff.groupby("kind")["n"].sum().items()},
         }
+    # Достоверность раздела не выше общей (иначе шапка говорит «средняя», а разделы — «высокая»)
+    cap = LEVELS.index(out["reliability"]["level"])
+    for key in ("trend", "distribution", "time", "lifecycle", "compare", "channels"):
+        blk = out.get(key)
+        if blk and "rel" in blk:
+            blk["rel"] = _cap(blk["rel"], cap)
     return out
 
 
@@ -324,22 +372,39 @@ def user_metrics(ds: Dataset) -> pd.DataFrame:
     df["weeks_active"] = wk
     df["weeks_share"] = wk / W
 
-    # Тренд: вторая половина окна против первой (в расчёте на день)
+    # «Пачками»: три самых активных дня дают основную часть сообщений
+    top3 = np.sort(vals, axis=1)[:, -3:].sum(axis=1)
+    burst_share = np.where(n > 0, top3 / np.maximum(n, 1), 0.0)
+    bursty = (ad >= MIN_USER_ACTIVE_DAYS_TREND) & (burst_share >= BURST_TOP3_SHARE)
+    df["burst_share"] = burst_share
+
+    # Тренд: последние w дней против предыдущих w дней
     if D >= MIN_TREND_DAYS:
-        h = D // 2
-        f = vals[:, :h].sum(axis=1).astype(float)
-        s = vals[:, h:].sum(axis=1).astype(float)
-        f_rate, s_rate = f / h, s / (D - h)
-        ratio = np.where(f_rate > 0, s_rate / np.where(f_rate > 0, f_rate, 1.0), np.nan)
+        w = min(14, D // 2)
+        last_n = vals[:, -w:].sum(axis=1).astype(float)
+        prev_n = vals[:, -2 * w:-w].sum(axis=1).astype(float)
+        ratio = np.where(prev_n > 0, last_n / np.where(prev_n > 0, prev_n, 1.0), np.nan)
+        few = (n < MIN_USER_MSGS_TREND) | (ad < MIN_USER_ACTIVE_DAYS_TREND)
+        silent = df["days_since_last"].values >= DORMANT_DAYS
+        appeared = (prev_n == 0) & (last_n > 0)
         trend = np.select(
-            [(f == 0) & (s > 0), (f > 0) & (s == 0), ratio >= TREND_UP, ratio <= TREND_DOWN],
-            ["новый в окне", "притих", "растёт", "снижается"], default="стабильно")
-        trend = np.where(n < MIN_USER_MSGS_TREND, "мало данных", trend)
+            [few, silent, bursty, appeared & (first >= D - w), appeared,
+             ratio >= TREND_UP, ratio <= TREND_DOWN],
+            ["мало данных", "притих", "пачками", "новый в окне", "вернулся",
+             "растёт", "снижается"],
+            default="стабильно")
+        ratio = np.where(trend == "притих", 0.0, ratio)
         df["trend_ratio"] = ratio
         df["trend"] = trend
+        df["trend_window"] = w
+        df["recent_n"] = last_n
+        df["prev_n"] = prev_n
     else:
         df["trend_ratio"] = np.nan
         df["trend"] = "н/д (короткое окно)"
+        df["trend_window"] = np.nan
+        df["recent_n"] = np.nan
+        df["prev_n"] = np.nan
 
     # Имена, роль, ответы
     info = ds.users.drop_duplicates("uid").set_index("uid")
@@ -379,15 +444,20 @@ def user_metrics(ds: Dataset) -> pd.DataFrame:
     if len(ht):
         ph = (ht.groupby(["uid", "hour"])["n"].sum().reset_index()
                 .sort_values(["uid", "n"], ascending=[True, False]).drop_duplicates("uid").set_index("uid"))
-        pw = (ht.groupby(["uid", "weekday"])["n"].sum().reset_index()
-                .sort_values(["uid", "n"], ascending=[True, False]).drop_duplicates("uid").set_index("uid"))
         tot_u = ht.groupby("uid")["n"].sum()
         night = ht[ht["hour"] < NIGHT_HOURS].groupby("uid")["n"].sum()
         wkend = ht[ht["weekday"] >= 5].groupby("uid")["n"].sum()
         df["peak_hour"] = ph["hour"].reindex(uids).values
-        df["peak_weekday"] = pw["weekday"].reindex(uids).values
         df["night_share"] = (night.reindex(uids).fillna(0) / tot_u.reindex(uids)).values
         df["weekend_share"] = (wkend.reindex(uids).fillna(0) / tot_u.reindex(uids)).values
+
+    # Привычный день недели: по числу АКТИВНЫХ ДНЕЙ (а не сообщений), иначе один день решает всё
+    wd_codes = np.asarray(days.weekday)
+    wd_days = np.stack([act[:, wd_codes == k].sum(axis=1) for k in range(7)], axis=1)
+    wd_msgs = np.stack([vals[:, wd_codes == k].sum(axis=1) for k in range(7)], axis=1)
+    pw = (wd_days.astype(np.int64) * 1_000_000_000 + wd_msgs).argmax(axis=1).astype(float)
+    pw = np.where(wd_days.max(axis=1) >= 2, pw, np.nan)    # без повторяемости закономерности нет
+    df["peak_weekday"] = np.where(bursty, np.nan, pw)      # у «пачечных» день недели не показываем
 
     # Место на сервере
     total = float(n.sum())
