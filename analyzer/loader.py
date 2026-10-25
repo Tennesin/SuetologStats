@@ -132,6 +132,17 @@ def _table(wb, name: str) -> list[dict]:
     return [dict(zip(head, r)) for r in it if r and any(v is not None for v in r)]
 
 
+def _to_gen_date(v) -> Optional[date]:
+    """Дата из ячейки «Сформирован» (дд.мм.гггг чч:мм)."""
+    t = _s(v)
+    for fmt in ("%d.%m.%Y %H:%M", "%d.%m.%Y"):
+        try:
+            return datetime.strptime(t, fmt).date()
+        except ValueError:
+            pass
+    return None
+
+
 # ---------- Разбор листов ----------
 
 def parse_info(wb):
