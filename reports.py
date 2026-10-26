@@ -605,6 +605,21 @@ def sheet_data(wb, agg: Agg, result: ScanResult):
         [("unresolved", result.reply_unresolved),
          ("self_or_bot", result.reply_self_or_bot)],
     )
+    table(
+        "data_emoji",
+        ["uid", "emoji", "only", "uses"],
+        ((str(u), key, flag, n) for (u, key, flag), n in result.emoji_user.items()),
+    )
+    table(
+        "data_emoji_info",
+        ["emoji", "name", "animated", "external"],
+        ((key, name, anim, ext) for key, (name, anim, ext) in result.emoji_info.items()),
+    )
+    table(
+        "data_emoji_days",
+        ["uid", "date", "messages"],
+        ((str(u), d.isoformat(), n) for (u, d), n in result.emoji_only_day.items()),
+    )
     if result.user_server:
         table(
             "data_servers",
@@ -625,7 +640,7 @@ def sheet_info(wb, F, guild_name, params, state, matrix_note, truncated, merged=
     info = [
         ("Сервер", guild_name),
         ("Период", period_text(params)),
-        ("Схема данных", "2"),
+        ("Схема данных", "3"),
         ("Период: начало (ISO)", params.start_date.isoformat() if params.start_date else "нет"),
         ("Период: конец (ISO)", params.end_date.isoformat() if params.end_date else "нет"),
         ("Суммарный файл", "да" if merged else "нет"),

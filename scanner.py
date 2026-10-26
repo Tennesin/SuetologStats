@@ -18,6 +18,7 @@ from config import (
     ADMIN_ROLES, CONCURRENCY, DATE_FMT, EXCLUDE_FILE, GUILD_START_DATES, IGNORED_CHATS,
     MIN_START_DATE, PROGRESS_INTERVAL, TZ, fmt_duration, fmt_list, fmt_num, log,
 )
+from emoji_utils import parse_emoji
 
 # Считаем только обычные сообщения и ответы; системные и сообщения ботов не учитываются.
 COUNTED_TYPES = {discord.MessageType.default, discord.MessageType.reply}
@@ -78,6 +79,9 @@ class ScanResult:
     replies: dict = field(default_factory=lambda: defaultdict(int))       # uid -> n
     reply_pairs: dict = field(default_factory=lambda: defaultdict(int))   # (кто ответил, кому) -> n
     mention_pairs: dict = field(default_factory=lambda: defaultdict(int)) # (кто тегнул, кого) -> n
+    emoji_user: dict = field(default_factory=lambda: defaultdict(int))      # (uid, ключ эмодзи, только_эмодзи 0/1) -> n
+    emoji_only_day: dict = field(default_factory=lambda: defaultdict(int))  # (uid, date) -> сообщений «только эмодзи»
+    emoji_info: dict = field(default_factory=dict)                          # ключ -> (имя, анимированный 0/1, внешний 0/1)
     reply_unresolved: int = 0                                             # ответов, где адресат неизвестен
     reply_self_or_bot: int = 0                                            # ответы себе и ботам (не учитываются)
     names: dict = field(default_factory=dict)                             # uid -> ник
@@ -106,6 +110,7 @@ class ScanState:
         self.seen = 0
         self.counted = 0
         self.inactive = 0
+        self.text_seen = 0
         self.skipped: list[str] = []
         self.failed: list[str] = []
         self.excluded: list[str] = []
@@ -240,7 +245,7 @@ def save_store(data: dict):
 
 def build_rules(guild_id: int, extra_text: Optional[str]) -> ExcludeRules:
     rules = ExcludeRules()
-    for item in IGNORED_CHATS:
+    for item in IGNORED_CHATS.get(guild_id, ()):
         rules.add_token(item)
     for entry in load_store().get(str(guild_id), []):
         if entry.get("id"):
@@ -362,7 +367,7 @@ async def collect_staff(guild: discord.Guild, state: ScanState) -> StaffInfo:
             info.partial = True
 
     wanted: dict[str, str] = {}      # ключ правила -> как показывать в отчёте
-    for item in ADMIN_ROLES:
+    for item in ADMIN_ROLES.get(guild.id, ()):
         if isinstance(item, int) or looks_like_id(str(item)):
             wanted[f"id:{int(item)}"] = str(item)
         elif norm_name(item):
@@ -415,7 +420,8 @@ async def collect_staff(guild: discord.Guild, state: ScanState) -> StaffInfo:
 
 # ---------- Чтение истории ----------
 
-async def scan_channels(channels, params: ScanParams, state: ScanState) -> ScanResult:
+async def scan_channels(channels, params: ScanParams, state: ScanState,
+                        own_emoji_ids=frozenset()) -> ScanResult:
     start_dt, end_dt = period_bounds(params)
     user_id = params.user.id if params.user else None
 
@@ -458,7 +464,7 @@ async def scan_channels(channels, params: ScanParams, state: ScanState) -> ScanR
                     target.heat[(local.weekday(), local.hour)] += 1
                     target.user_heat[(uid, local.weekday(), local.hour)] += 1
 
-                    reply_dst = None      # кому адресован ответ (чтобы не посчитать его ещё и как тег)
+                    reply_dst = None
                     if m.type == discord.MessageType.reply:
                         target.replies[uid] += 1
                         ref = m.reference.resolved if m.reference else None
@@ -481,6 +487,20 @@ async def scan_channels(channels, params: ScanParams, state: ScanState) -> ScanR
                         target.mention_pairs[(uid, u.id)] += 1
                         main.names.setdefault(u.id, u.display_name)
                         main.usernames.setdefault(u.id, u.name)
+
+                    # Эмодзи (текст доступен только с Message Content Intent)
+                    if m.content:
+                        state.text_seen += 1
+                        found, only = parse_emoji(m.content)
+                        if found:
+                            flag = 1 if only else 0
+                            for key, ename, animated, cid in found:
+                                target.emoji_user[(uid, key, flag)] += 1
+                                if key not in main.emoji_info:
+                                    external = int(bool(cid) and cid not in own_emoji_ids)
+                                    main.emoji_info[key] = (ename, int(animated), external)
+                            if only:
+                                target.emoji_only_day[(uid, day)] += 1
 
                     main.channel_names.setdefault(ch.id, label)
                     ts = name_ts.get(uid)
@@ -534,7 +554,19 @@ async def scan_guild(guild: discord.Guild, params: ScanParams, bot_user_id: int,
             guild.name, len(channels), len(state.excluded), len(state.skipped), state.inactive,
         )
         staff = await collect_staff(guild, state)
-        result = await scan_channels(channels, params, state)
+
+        # Эмодзи этого сервера: всё, чего здесь нет, считается «внешним»
+        try:
+            own_emoji_ids = frozenset(e.id for e in await guild.fetch_emojis())
+        except discord.HTTPException:
+            own_emoji_ids = frozenset(e.id for e in guild.emojis)
+
+        result = await scan_channels(channels, params, state, own_emoji_ids)
+        if state.counted >= 100 and state.text_seen == 0 and not state.cancelled:
+            state.notes.append(
+                "Текст сообщений недоступен (проверьте Message Content Intent): "
+                "данные по эмодзи пустые, это не значит, что их никто не использует."
+            )
         result.staff = staff
         return result
     finally:
@@ -561,6 +593,14 @@ def _merge_into(dst: ScanResult, src: ScanResult, server: Optional[str]):
         dst.reply_pairs[key] += v
     for key, v in src.mention_pairs.items():
         dst.mention_pairs[key] += v
+    for key, v in src.emoji_user.items():
+        dst.emoji_user[key] += v
+    for key, v in src.emoji_only_day.items():
+        dst.emoji_only_day[key] += v
+    for key, info in src.emoji_info.items():
+        old = dst.emoji_info.get(key)
+        if old is None or (old[2] and not info[2]):
+            dst.emoji_info[key] = info
     dst.reply_unresolved += src.reply_unresolved
     dst.reply_self_or_bot += src.reply_self_or_bot
     for uid, nm in src.names.items():

@@ -399,10 +399,10 @@ async def exclude_list(interaction: discord.Interaction):
     if not is_allowed(interaction):
         await interaction.response.send_message("Нет доступа к этой команде.", ephemeral=True)
         return
-    code_items = [str(x) for x in IGNORED_CHATS]
+    code_items = sorted(str(x) for x in IGNORED_CHATS.get(interaction.guild.id, ()))
     stored = [_stored_label(e) for e in load_store().get(str(interaction.guild.id), [])]
     text = (
-        "**Пропускаются всегда (в коде, IGNORED_CHATS):** "
+        "**Пропускаются всегда (в коде, IGNORED_CHATS этого сервера):** "
         + (", ".join(code_items) if code_items else "—")
         + "\n**Постоянный список этого сервера:** "
         + (", ".join(stored) if stored else "—")
