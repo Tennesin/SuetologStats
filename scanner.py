@@ -77,6 +77,7 @@ class ScanResult:
     user_heat: dict = field(default_factory=lambda: defaultdict(int))     # (uid, weekday, hour) -> n
     replies: dict = field(default_factory=lambda: defaultdict(int))       # uid -> n
     reply_pairs: dict = field(default_factory=lambda: defaultdict(int))   # (кто ответил, кому) -> n
+    mention_pairs: dict = field(default_factory=lambda: defaultdict(int)) # (кто тегнул, кого) -> n
     reply_unresolved: int = 0                                             # ответов, где адресат неизвестен
     reply_self_or_bot: int = 0                                            # ответы себе и ботам (не учитываются)
     names: dict = field(default_factory=dict)                             # uid -> ник
@@ -456,11 +457,14 @@ async def scan_channels(channels, params: ScanParams, state: ScanState) -> ScanR
                     target.user_channel[(uid, ch.id)] += 1
                     target.heat[(local.weekday(), local.hour)] += 1
                     target.user_heat[(uid, local.weekday(), local.hour)] += 1
+
+                    reply_dst = None      # кому адресован ответ (чтобы не посчитать его ещё и как тег)
                     if m.type == discord.MessageType.reply:
                         target.replies[uid] += 1
                         ref = m.reference.resolved if m.reference else None
                         if isinstance(ref, discord.Message):
                             dst = ref.author
+                            reply_dst = dst.id
                             if dst.bot or dst.id == uid:
                                 target.reply_self_or_bot += 1
                             else:
@@ -469,6 +473,15 @@ async def scan_channels(channels, params: ScanParams, state: ScanState) -> ScanR
                                 main.usernames.setdefault(dst.id, dst.name)
                         else:
                             target.reply_unresolved += 1
+
+                    # Теги конкретных людей. Роли, @everyone и @here в m.mentions не попадают.
+                    for u in m.mentions:
+                        if u.bot or u.id == uid or u.id == reply_dst:
+                            continue
+                        target.mention_pairs[(uid, u.id)] += 1
+                        main.names.setdefault(u.id, u.display_name)
+                        main.usernames.setdefault(u.id, u.name)
+
                     main.channel_names.setdefault(ch.id, label)
                     ts = name_ts.get(uid)
                     if ts is None or m.created_at >= ts:
@@ -546,6 +559,8 @@ def _merge_into(dst: ScanResult, src: ScanResult, server: Optional[str]):
         dst.replies[uid] += v
     for key, v in src.reply_pairs.items():
         dst.reply_pairs[key] += v
+    for key, v in src.mention_pairs.items():
+        dst.mention_pairs[key] += v
     dst.reply_unresolved += src.reply_unresolved
     dst.reply_self_or_bot += src.reply_self_or_bot
     for uid, nm in src.names.items():

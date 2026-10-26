@@ -281,3 +281,28 @@ def build_period(period: Optional[str], start_text: Optional[str],
                 f"{MIN_START_DATE.strftime(DATE_FMT)} — сравнивать не с чем."
             )
     return s, e, key, label
+
+# ---------- Папки отчётов: год-месяц / сборник ----------
+
+def period_folder_name(start: Optional[date], end: Optional[date]) -> str:
+    """«26-10» для одного дня, «18-10 - 25-10» для периода."""
+    if start and end and start != end:
+        return f"{start.strftime('%d-%m')} - {end.strftime('%d-%m')}"
+    d = end or start or today_local()
+    return d.strftime("%d-%m")
+
+def collection_dir(start: Optional[date], end: Optional[date],
+                   base: Optional[str] = None, unique: bool = False) -> str:
+    """Путь к папке сборника: <base>/<год-месяц>/<день-месяц ...>.
+    Папка по дате конца периода. Сама папка здесь НЕ создаётся: её создаёт save_local_copy.
+    unique=True — если такая папка уже есть, добавляется « (2)», « (3)» и т. д."""
+    base = base or STATS_DIR or "output"
+    ref = end or start or today_local()
+    path = os.path.join(base, ref.strftime("%Y-%m"), period_folder_name(start, end))
+    if unique:
+        cand, i = path, 2
+        while os.path.exists(cand):
+            cand = f"{path} ({i})"
+            i += 1
+        path = cand
+    return os.path.abspath(path)

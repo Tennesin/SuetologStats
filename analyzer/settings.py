@@ -14,6 +14,7 @@ SHEET_DATA_HEAT = "data_heat"
 SHEET_DATA_SERVERS = "data_servers"
 SHEET_DATA_PREV = "data_prev"
 SHEET_DATA_REPLIES = "data_replies"
+SHEET_DATA_MENTIONS = "data_mentions"
 SHEET_DATA_REPLY_META = "data_reply_meta"
 
 REQUIRED_SHEETS = [SHEET_SUMMARY, SHEET_DAILY, SHEET_INFO]

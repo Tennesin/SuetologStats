@@ -595,6 +595,11 @@ def sheet_data(wb, agg: Agg, result: ScanResult):
         ((str(a), str(b), n) for (a, b), n in result.reply_pairs.items()),
     )
     table(
+        "data_mentions",
+        ["src", "dst", "messages"],
+        ((str(a), str(b), n) for (a, b), n in result.mention_pairs.items()),
+    )
+    table(
         "data_reply_meta",
         ["key", "value"],
         [("unresolved", result.reply_unresolved),

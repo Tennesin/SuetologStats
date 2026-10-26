@@ -12,7 +12,7 @@ from dataclasses import replace
 import discord
 
 from config import (
-    DETAIL_LABELS, SORT_LABELS, STATS_DIR, build_period, fmt_duration, fmt_num,
+    DETAIL_LABELS, SORT_LABELS, STATS_DIR, build_period, collection_dir, fmt_duration, fmt_num,
     log, safe_filename, save_local_copy, DATE_FMT,
 )
 from reports import build_xlsx, period_text
@@ -93,26 +93,13 @@ def parse_cli_stats(args: list[str]):
     )
     return ids, all_guilds, params
 
-def period_slug(params: ScanParams) -> str:
-    if params.period_key:
-        return params.period_key
-    if params.start_date or params.end_date:
-        s = params.start_date.strftime("%d%m%Y") if params.start_date else "start"
-        e = params.end_date.strftime("%d%m%Y") if params.end_date else "now"
-        return f"{s}-{e}"
-    return "all"
-
-
 async def run_batch(bot: discord.Client, guilds: list[discord.Guild], params: ScanParams):
     _cli["busy"], _cli["cancel"] = True, False
     started = time.monotonic()
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    folder = os.path.abspath(os.path.join(
-        STATS_DIR or "output", f"stats_{period_slug(params)}_{stamp}"))
+    folder = collection_dir(params.start_date, params.end_date, STATS_DIR, unique=True)
     results = []
     used_params = []
     try:
-        await asyncio.to_thread(os.makedirs, folder, exist_ok=True)
         for i, g in enumerate(guilds, start=1):
             if _cli["cancel"]:
                 break

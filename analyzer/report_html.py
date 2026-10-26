@@ -375,12 +375,12 @@ def _explain(ds, um, uid, r, D) -> dict:
     }
 
 def _reply_section(ds, uid, r) -> str:
-    """Раздел «Общение»: кому отвечает и кто отвечает ему."""
-    rp = ds.reply_pairs
-    if rp is None or rp.empty:
+    """Раздел «Общение»: к кому обращается и кто обращается к нему (ответы + теги)."""
+    ap = ds.address_pairs
+    if ap is None or ap.empty:
         return ""
-    out_df = rp[rp["src"] == uid]
-    in_df = rp[rp["dst"] == uid]
+    out_df = ap[ap["src"] == uid]
+    in_df = ap[ap["dst"] == uid]
     if out_df.empty and in_df.empty:
         return ""
 
@@ -389,46 +389,60 @@ def _reply_section(ds, uid, r) -> str:
     def nm(u):
         return names.get(u) or u
 
+    def pairs(df):
+        return dict(zip(zip(df["src"], df["dst"]), df["n"]))
+
+    rep = pairs(ds.reply_pairs)      # (src, dst) -> ответов
+    men = pairs(ds.mention_pairs)    # (src, dst) -> тегов
+
     out_total, in_total = int(out_df["n"].sum()), int(in_df["n"].sum())
-    my_to = dict(zip(out_df["dst"], out_df["n"]))      # сколько он ответил каждому
-    to_me = dict(zip(in_df["src"], in_df["n"]))        # сколько каждый ответил ему
+    my_to = dict(zip(out_df["dst"], out_df["n"]))      # сколько обращений он направил каждому
+    to_me = dict(zip(in_df["src"], in_df["n"]))        # сколько обращений каждый направил ему
     msgs = max(int(r["messages"]), 1)
 
-    parts = [h2("Общение (ответы)")]
+    parts = [h2("Общение (ответы и теги)")]
     parts.append('<div class="cards">' + "".join([
-        card("Получено ответов", num(in_total), f"от {in_df['src'].nunique()} чел."),
-        card("Ответил(а) сам(а)", num(out_total), f"{out_df['dst'].nunique()} адресатов"),
-        card("Ответов на 1 сообщение", num(in_total / msgs, 2)),
-        card("Взаимность", pct(r["reciprocity"]), "ответы тем, кто отвечал ему"),
+        card("Получено обращений", num(in_total), f"от {in_df['src'].nunique()} чел."),
+        card("Обратился(лась) сам(а)", num(out_total), f"к {out_df['dst'].nunique()} чел."),
+        card("Обращений на 1 сообщение", num(in_total / msgs, 2)),
+        card("Взаимность", pct(r["reciprocity"]), "обращения к тем, кто обращался к нему"),
     ]) + "</div>")
 
     if not out_df.empty:
-        parts.append("<h3>Кому отвечает чаще всего</h3>")
+        parts.append("<h3>К кому обращается чаще всего</h3>")
         top = out_df.sort_values("n", ascending=False).head(8)
         parts.append(table(
-            ["Пользователь", "Ответов", "Доля его ответов", "Ответил(а) ему в ответ"],
-            [[nm(x.dst), int(x.n), pct(x.n / out_total), int(to_me.get(x.dst, 0))]
+            ["Пользователь", "Обращений", "Доля его обращений", "из них ответов", "из них тегов",
+             "Обратился(лась) к нему в ответ"],
+            [[nm(x.dst), int(x.n), pct(x.n / out_total),
+              int(rep.get((uid, x.dst), 0)), int(men.get((uid, x.dst), 0)),
+              int(to_me.get(x.dst, 0))]
              for x in top.itertuples()],
-            num_cols=(1, 2, 3)))
+            num_cols=(1, 2, 3, 4, 5)))
 
     if not in_df.empty:
-        parts.append("<h3>Кто отвечает ему чаще всего</h3>")
+        parts.append("<h3>Кто обращается к нему чаще всего</h3>")
         top = in_df.sort_values("n", ascending=False).head(8)
         parts.append(table(
-            ["Пользователь", "Ответов ему", "Доля всех ответов ему", "Он(а) ответил(а) в ответ"],
-            [[nm(x.src), int(x.n), pct(x.n / in_total), int(my_to.get(x.src, 0))]
+            ["Пользователь", "Обращений к нему", "Доля всех обращений к нему", "из них ответов",
+             "из них тегов", "Он(а) обратился(лась) в ответ"],
+            [[nm(x.src), int(x.n), pct(x.n / in_total),
+              int(rep.get((x.src, uid), 0)), int(men.get((x.src, uid), 0)),
+              int(my_to.get(x.src, 0))]
              for x in top.itertuples()],
-            num_cols=(1, 2, 3)))
+            num_cols=(1, 2, 3, 4, 5)))
 
-    known = int(rp["n"].sum())
+    known = int(ds.reply_pairs["n"].sum()) if len(ds.reply_pairs) else 0
     lost = ds.reply_unresolved + ds.reply_self_or_bot
     total_all = known + lost
+    note = ("Обращение — это ответ (кнопка «Ответить») или тег конкретного человека. "
+            "Теги ролей, @everyone, @here, ботов и самого себя не учитываются. "
+            "Ответ, в котором тегнут его же адресат, считается одним обращением. ")
     if total_all:
-        parts.append(
-            f'<p class="muted">Учтены ответы, где известен адресат: {num(known)} из {num(total_all)} '
-            f"({pct(known / total_all)}) по серверу. Не учитываются: ответы на удалённые или "
-            "недоступные сообщения, ответы самому себе и ботам. Сообщения, написанные без кнопки "
-            "«Ответить», здесь тоже не видны, поэтому цифры — нижняя оценка общения.</p>")
+        note += (f"Ответов, где известен адресат: {num(known)} из {num(total_all)} ({pct(known / total_all)}) "
+                 "по серверу; ответы на удалённые сообщения, самому себе и ботам не учтены. ")
+    note += "Общение без ответа и без тега здесь не видно, поэтому цифры — нижняя оценка."
+    parts.append(f'<p class="muted">{note}</p>')
     return "".join(parts)
 
 def build_user_html(ds, uid, um, sk, days, avatar=None) -> str:

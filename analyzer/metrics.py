@@ -316,7 +316,7 @@ def server_metrics(ds: Dataset) -> dict:
 # ---------- Личные метрики ----------
 
 def reply_metrics(ds: Dataset, uids) -> pd.DataFrame:
-    """Метрики общения по ответам. Если данных о парах нет (старый файл) — всё NaN."""
+    """Метрики общения по обращениям (ответы + теги). Если данных нет (старый файл) — всё NaN."""
     num_cols = ["replies_in", "reply_sources", "replies_out_known", "reply_targets",
                 "in_weighted", "reciprocity", "top_target_share", "top_source_share"]
     out = pd.DataFrame(index=uids)
@@ -325,7 +325,7 @@ def reply_metrics(ds: Dataset, uids) -> pd.DataFrame:
     out["top_target"] = ""
     out["top_source"] = ""
 
-    rp = ds.reply_pairs
+    rp = ds.address_pairs
     if rp is None or rp.empty:
         return out
     rp = rp.copy()
@@ -340,20 +340,20 @@ def reply_metrics(ds: Dataset, uids) -> pd.DataFrame:
     for c in ("replies_out_known", "reply_targets"):
         out[c] = outg[c].reindex(uids).fillna(0).values
 
-    # Взаимность: какая доля ответов человека ушла тем, кто хоть раз ответил ему
+    # Взаимность: какая доля обращений человека ушла тем, кто хоть раз обратился к нему
     back = rp[["src", "dst", "n"]].rename(columns={"src": "dst", "dst": "src", "n": "n_back"})
     mm = rp.merge(back, on=["src", "dst"], how="left")
     mm["mutual"] = mm["n"].where(mm["n_back"].fillna(0) > 0, 0)
     rec = mm.groupby("src")["mutual"].sum() / mm.groupby("src")["n"].sum()
     out["reciprocity"] = rec.reindex(uids).values
 
-    # Главный адресат (кому он отвечает чаще всего)
+    # Главный адресат (к кому он обращается чаще всего)
     t = (rp.sort_values(["src", "n"], ascending=[True, False])
            .drop_duplicates("src").set_index("src"))
     out["top_target"] = t["dst"].reindex(uids).fillna("").values
     out["top_target_share"] = (t["n"] / outg["replies_out_known"]).reindex(uids).values
 
-    # Главный отвечающий (кто чаще всего отвечает ему)
+    # Главный «обращающийся» (кто чаще всего обращается к нему)
     s = (rp.sort_values(["dst", "n"], ascending=[True, False])
            .drop_duplicates("dst").set_index("dst"))
     out["top_source"] = s["src"].reindex(uids).fillna("").values

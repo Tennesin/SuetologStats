@@ -57,6 +57,8 @@ class Dataset:
     reply_pairs: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=REPLY_COLS))
     reply_unresolved: int = 0
     reply_self_or_bot: int = 0
+    mention_pairs: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=REPLY_COLS))
+    address_pairs: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=REPLY_COLS))
 
     @property
     def total_messages(self) -> int:
@@ -244,13 +246,23 @@ def load_dataset(path: Path) -> Dataset:
     finally:
         wb.close()
 
+def _pairs(wb, sheet: str) -> pd.DataFrame:
+    """Лист «src, dst, messages» -> таблица пар. Нет листа — пустая таблица."""
+    if sheet not in wb.sheetnames:
+        return _df([], REPLY_COLS)
+    rows = [(_uid(r.get("src")), _uid(r.get("dst")), _to_int(r.get("messages")))
+            for r in _table(wb, sheet)]
+    rows = [r for r in rows if r[0] and r[1] and r[2] > 0]
+    return _df(rows, REPLY_COLS)
+
 def _load_replies(wb, ds: Dataset):
-    """Кто кому отвечал. В старых файлах листа нет: таблица остаётся пустой."""
-    if S.SHEET_DATA_REPLIES in wb.sheetnames:
-        rows = [(_uid(r.get("src")), _uid(r.get("dst")), _to_int(r.get("messages")))
-                for r in _table(wb, S.SHEET_DATA_REPLIES)]
-        rows = [r for r in rows if r[0] and r[1] and r[2] > 0]
-        ds.reply_pairs = _df(rows, REPLY_COLS)
+    """Кто кому отвечал и кого тегал."""
+    ds.reply_pairs = _pairs(wb, S.SHEET_DATA_REPLIES)
+    ds.mention_pairs = _pairs(wb, S.SHEET_DATA_MENTIONS)
+    parts = [p for p in (ds.reply_pairs, ds.mention_pairs) if not p.empty]
+    if parts:
+        ds.address_pairs = (pd.concat(parts, ignore_index=True)
+                            .groupby(["src", "dst"], as_index=False)["n"].sum())
     if S.SHEET_DATA_REPLY_META in wb.sheetnames:
         meta = {_s(r.get("key")): _to_int(r.get("value"))
                 for r in _table(wb, S.SHEET_DATA_REPLY_META)}
@@ -407,7 +419,8 @@ def _build(wb, path: Path) -> Dataset:
 
 def discover(path: Path) -> tuple[list[Path], Optional[Path]]:
     """Возвращает (список xlsx, папка, выбранная автоматически или None).
-    Принимает файл, папку с xlsx или родительскую папку output со вложенными stats_*."""
+    Принимает файл, папку со сборником, папку «год-месяц» или корень output:
+    из вложенных сборников берётся самый свежий (по времени файлов xlsx)."""
     if path.is_file():
         return ([path] if path.suffix.lower() == ".xlsx" else []), None
 
@@ -417,9 +430,10 @@ def discover(path: Path) -> tuple[list[Path], Optional[Path]]:
     files = xlsx_in(path)
     chosen = None
     if not files:
-        subs = [d for d in path.glob("stats_*") if d.is_dir() and xlsx_in(d)]
-        if subs:
-            chosen = max(subs, key=lambda d: d.stat().st_mtime)
+        cands = [d for d in (*path.glob("*"), *path.glob("*/*"))
+                 if d.is_dir() and d.name != "analysis" and xlsx_in(d)]
+        if cands:
+            chosen = max(cands, key=lambda d: max(p.stat().st_mtime for p in xlsx_in(d)))
             files = xlsx_in(chosen)
     # суммарный файл — последним
     files.sort(key=lambda p: (p.name.startswith(S.MERGED_FILE_PREFIX), p.name.casefold()))

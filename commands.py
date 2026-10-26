@@ -12,7 +12,7 @@ from discord import app_commands
 
 from config import (
     ALLOWED_USER_ID, DETAIL_LABELS, FORMAT_LABELS, PERIOD_PRESETS, SORT_LABELS,
-    STATS_DIR, UPLOAD_LIMIT, build_period, fmt_num, log, resolve_period,
+    STATS_DIR, UPLOAD_LIMIT, build_period, collection_dir, fmt_num, log, resolve_period,
     save_local_copy, normalize_period_key,
 )
 from reports import build_report, build_xlsx
@@ -61,6 +61,7 @@ async def send_with_fallback(user, channel, content: str,
 async def deliver(guild, requester, channel, params: ScanParams, state: ScanState, result):
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     base = f"stats_{guild.id}_{stamp}"
+    folder = collection_dir(params.start_date, params.end_date, STATS_DIR)
 
     files: list[tuple[str, bytes]] = []
     if params.fmt in ("xlsx", "both"):
@@ -72,7 +73,7 @@ async def deliver(guild, requester, channel, params: ScanParams, state: ScanStat
 
     if STATS_DIR:
         for name, data in files:
-            await asyncio.to_thread(save_local_copy, name, data)
+            await asyncio.to_thread(save_local_copy, name, data, folder)
 
     to_send: list[tuple[str, bytes]] = []
     too_big: list[str] = []
@@ -88,7 +89,7 @@ async def deliver(guild, requester, channel, params: ScanParams, state: ScanStat
                 notes += " (txt большой, поэтому он в zip)"
                 continue
         if len(data) > UPLOAD_LIMIT:
-            too_big.append(await asyncio.to_thread(save_local_copy, name, data))
+            too_big.append(await asyncio.to_thread(save_local_copy, name, data, folder))
         else:
             to_send.append((name, data))
 
@@ -113,9 +114,8 @@ async def deliver(guild, requester, channel, params: ScanParams, state: ScanStat
     )
     sent = await send_with_fallback(requester, channel, content, to_send)
     if sent is None:
-        saved = [await asyncio.to_thread(save_local_copy, n, d) for n, d in to_send]
+        saved = [await asyncio.to_thread(save_local_copy, n, d, folder) for n, d in to_send]
         log.error("Не удалось отправить отчёт. Он сохранён: %s", ", ".join(saved))
-
 
 async def run_scan(guild, requester, channel, params: ScanParams, state: ScanState,
                    status_msg: Optional[discord.Message], bot_user_id: int):

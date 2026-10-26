@@ -43,15 +43,12 @@ def describe(ds: Dataset):
     else:
         print("  Проверки пройдены без замечаний.")
 
-
 def slugify(text: str) -> str:
     return re.sub(r"[^\w\-]+", "_", text, flags=re.U).strip("_")[:60] or "report"
-
 
 _BAD_FN = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
              *(f"LPT{i}" for i in range(1, 10))}
-
 
 def user_filename(row, uid: str, used: set) -> str:
     """Имя файла вида «ник.html»; ID добавляется, только если такое имя уже занято."""
@@ -64,6 +61,18 @@ def user_filename(row, uid: str, used: set) -> str:
     used.add(base.casefold())
     return base + ".html"
 
+def report_folder_name(ds: Dataset, used: set) -> str:
+    """Имя папки отчёта: название сервера без ID. При совпадении имён в одном запуске добавляется ID."""
+    base = "Суммарно" if ds.is_merged else (slugify(ds.title) or "report")
+    name = base
+    if name.casefold() in used and ds.guild_id:
+        name = f"{base}_{ds.guild_id}"
+    i = 2
+    while name.casefold() in used:
+        name = f"{base}_{i}"
+        i += 1
+    used.add(name.casefold())
+    return name
 
 def make_reports(ds: Dataset, out_dir: Path, args):
     """Строит HTML (серверный + индивидуальные). Возвращает (папка, данные для сводного xlsx)."""
@@ -71,7 +80,8 @@ def make_reports(ds: Dataset, out_dir: Path, args):
     um = user_metrics(ds)
     sk = compute_skp(ds, um, args.top_n, args.min_skp) if len(um) else pd.DataFrame()
 
-    folder = out_dir / slugify(ds.path.stem)
+    used_folders = vars(args).setdefault("used_folders", set())   # общий набор на весь запуск
+    folder = out_dir / report_folder_name(ds, used_folders)
     (folder / "users").mkdir(parents=True, exist_ok=True)
 
     linked = {}
@@ -87,7 +97,6 @@ def make_reports(ds: Dataset, out_dir: Path, args):
             linked[uid] = fname
     (folder / "report.html").write_text(build_server_html(ds, sm, um, sk, linked), encoding="utf-8")
     return folder, {"ds": ds, "sm": sm, "um": um, "sk": sk}
-
 
 def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
@@ -157,10 +166,8 @@ def main() -> int:
     print(f"\nГотово: прочитано {len(loaded)} из {len(files)} файлов.")
     return 0
 
-
 def _pct(x) -> str:
     return "—" if x is None or x != x else f"{x * 100:.1f}%"
-
 
 def show_metrics(ds: Dataset, top: int):
     sm = server_metrics(ds)
@@ -234,7 +241,6 @@ def show_metrics(ds: Dataset, top: int):
             print(f"    {int(r['rank']):>3}. {str(r['name'])[:24]:<24} {int(r['messages']):>6} сообщ., "
                   f"дней {int(r['active_days']):>3}, серия {int(r['longest_streak'])}, "
                   f"тренд: {r['trend']}, достоверность: {r['reliability']}")
-
 
 if __name__ == "__main__":
     sys.exit(main())
