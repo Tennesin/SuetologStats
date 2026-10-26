@@ -20,6 +20,9 @@ HEAT_TOTAL_COLS = ["weekday", "hour", "n"]
 SERVER_COLS = ["uid", "server", "n"]
 STAFF_COLS = ["server", "uid", "name", "kind", "roles", "n"]
 REPLY_COLS = ["src", "dst", "n"]
+EMOJI_USER_COLS = ["uid", "key", "only", "n"]
+EMOJI_INFO_COLS = ["key", "name", "animated", "external"]
+EMOJI_DAY_COLS = ["uid", "date", "n"]
 
 class LoaderError(Exception):
     """Файл нельзя использовать (не тот формат, повреждён и т. п.)."""
@@ -59,6 +62,10 @@ class Dataset:
     reply_self_or_bot: int = 0
     mention_pairs: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=REPLY_COLS))
     address_pairs: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=REPLY_COLS))
+    has_emoji: bool = False
+    emoji_user: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=EMOJI_USER_COLS))
+    emoji_info: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=EMOJI_INFO_COLS))
+    emoji_days: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=EMOJI_DAY_COLS))
 
     @property
     def total_messages(self) -> int:
@@ -231,6 +238,32 @@ def parse_heat_total(wb) -> pd.DataFrame:
 
 # ---------- Сборка набора данных ----------
 
+def _load_emoji(wb, ds: Dataset):
+    """Эмодзи (схема 3). Нет листа data_emoji — файл старый, раздел в отчётах скрывается."""
+    if S.SHEET_DATA_EMOJI not in wb.sheetnames:
+        return
+    ds.has_emoji = True
+
+    rows = [(_uid(r.get("uid")), _s(r.get("emoji")), _to_int(r.get("only")), _to_int(r.get("uses")))
+            for r in _table(wb, S.SHEET_DATA_EMOJI)]
+    rows = [r for r in rows if r[0] and r[1] and r[3] > 0]
+    if rows:
+        ds.emoji_user = (_df(rows, EMOJI_USER_COLS)
+                         .groupby(["uid", "key", "only"], as_index=False)["n"].sum())
+
+    info = [(_s(r.get("emoji")), _s(r.get("name")), _to_int(r.get("animated")), _to_int(r.get("external")))
+            for r in _table(wb, S.SHEET_DATA_EMOJI_INFO)]
+    ds.emoji_info = _df([r for r in info if r[0]], EMOJI_INFO_COLS)
+
+    days = []
+    for r in _table(wb, S.SHEET_DATA_EMOJI_DAYS):
+        u, d, n = _uid(r.get("uid")), _to_date(r.get("date")), _to_int(r.get("messages"))
+        if u and d and n > 0:
+            days.append((u, d, n))
+    df = _df(days, EMOJI_DAY_COLS)
+    df["date"] = pd.to_datetime(df["date"])
+    ds.emoji_days = df.groupby(["uid", "date"], as_index=False)["n"].sum() if len(df) else df
+
 def load_dataset(path: Path) -> Dataset:
     try:
         wb = load_workbook(path, read_only=True, data_only=True)
@@ -242,6 +275,7 @@ def load_dataset(path: Path) -> Dataset:
             raise LoaderError("в файле нет листов: " + ", ".join(missing))
         ds = _build(wb, path)
         _load_replies(wb, ds)
+        _load_emoji(wb, ds)
         return ds
     finally:
         wb.close()

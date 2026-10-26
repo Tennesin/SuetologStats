@@ -181,7 +181,7 @@ def method_html() -> str:
 
 # ---------- Отчёт по серверу ----------
 
-def build_server_html(ds, sm, um, sk, linked) -> str:
+def build_server_html(ds, sm, um, sk, linked, emoji_html: str = "") -> str:
     rel = sm["reliability"]
     kind = "Суммарный отчёт" if ds.is_merged else "Отчёт по серверу"
     b = [
@@ -281,6 +281,9 @@ def build_server_html(ds, sm, um, sk, linked) -> str:
         b.append(table(["Канал", "Сообщений", "Доля", "Авторов"],
                        [[r["channel"], int(r["messages"]), pct(r["share"]), int(r["authors"])]
                         for _cid, r in chn["table"].head(15).iterrows()], num_cols=(1, 2, 3)))
+
+    if emoji_html:
+        b.append(emoji_html)
 
     # Жизненный цикл и сравнение
     lc = sm["lifecycle"]
@@ -445,7 +448,7 @@ def _reply_section(ds, uid, r) -> str:
     parts.append(f'<p class="muted">{note}</p>')
     return "".join(parts)
 
-def build_user_html(ds, uid, um, sk, days, avatar=None) -> str:
+def build_user_html(ds, uid, um, sk, days, avatar=None, emoji_html: str = "") -> str:
     r, s = um.loc[uid], sk.loc[uid]
     D = len(days)
     W = S.SKP_WEIGHTS
@@ -549,4 +552,6 @@ def build_user_html(ds, uid, um, sk, days, avatar=None) -> str:
                 b.append(f'<p class="muted">Показаны 8 из {len(mine_ch)} каналов.</p>')
 
     b.append(_reply_section(ds, uid, r))
+    if emoji_html:
+        b.append(emoji_html)
     return page(f"{r['name']} — индивидуальный отчёт", "".join(b))

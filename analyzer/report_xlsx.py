@@ -3,15 +3,14 @@
 import math
 import re
 from datetime import date, datetime
-
 import numpy as np
 import pandas as pd
 import xlsxwriter
-
 import settings as S
 
-_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+from emoji_tools import info_map, label_text
 
+_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 def _put(ws, r, c, v, fmt=None):
     if v is None or v is pd.NaT:
@@ -29,7 +28,6 @@ def _put(ws, r, c, v, fmt=None):
     else:
         ws.write_string(r, c, _CTRL.sub("", str(v)), fmt)
 
-
 def _sheet_name(base: str, used: set) -> str:
     name = re.sub(r"[\[\]:*?/\\]", "_", base).strip("'")[:31] or "Лист"
     cand, i = name, 2
@@ -39,7 +37,6 @@ def _sheet_name(base: str, used: set) -> str:
         i += 1
     used.add(cand.lower())
     return cand
-
 
 SERVER_HEADERS = ["Сервер", "Суммарный", "Период", "Дней в окне", "Пользователей", "Сообщений",
                   "В среднем в день", "DAU (среднее)", "Джини", "Доля топ-5", "Тренд",
@@ -62,6 +59,11 @@ USER_COLUMNS = [
     ("I взаимодействие", "I", "dec"), ("D зависимость", "D", "dec"), ("P роль", "P", "dec"),
     ("Риск потери", "risk_shown", "dec1"), ("Уровень риска", "risk_level_shown", "text"),
     ("Роль", "role", "text"),
+    ("Эмодзи всего", "emoji_uses", "int"), ("Эмодзи на сообщение", "emoji_per_msg", "dec"),
+    ("Сообщений «только эмодзи»", "emoji_only_msgs", "int"),
+    ("Доля «только эмодзи»", "emoji_only_share", "pct"),
+    ("Сообщений с текстом", "content_msgs", "int"), ("Активных дней с текстом", "content_days", "int"),
+    ("Любимый эмодзи", "emoji_top_label", "text"),
 ]
 
 METHOD_LINES = [
@@ -81,8 +83,11 @@ METHOD_LINES = [
     "СКП сравнивает людей внутри одного сервера за период; это не оценка человека.",
     "Достоверность (низкая/средняя/высокая) зависит от длины окна, числа сообщений и людей; "
     "при короткой истории все выводы ориентировочные.",
+    "",
+    "Эмодзи: считаются во всех сообщениях; «только эмодзи» — сообщение без другого текста. "
+    "Оттенки и вариации одного эмодзи объединены. «Внешний» — кастомный эмодзи не из списка эмодзи сервера.",
+    "Дни с текстом — активные дни, когда было хотя бы одно сообщение не только из эмодзи. В СКП эмодзи не входят.",
 ]
-
 
 def _server_row(it) -> list:
     ds, sm = it["ds"], it["sm"]
@@ -94,7 +99,6 @@ def _server_row(it) -> list:
     return base + [sm["users"], sm["messages"], ov["avg_per_day"], ov["avg_dau"], d["gini"], d["top5"],
                    tr["direction"] if tr["available"] else "не оценивается",
                    lc.get("retention"), level, len(ds.warnings)]
-
 
 def build_summary_xlsx(items: list, path):
     wb = xlsxwriter.Workbook(str(path), {"strings_to_numbers": False, "strings_to_formulas": False,
@@ -149,7 +153,35 @@ def build_summary_xlsx(items: list, path):
         ws.set_column(21, 21, 28)
         ws.set_column(22, 29, 11)
         ws.set_column(30, 30, 28)
+        ws.set_column(31, 36, 14)
+        ws.set_column(37, 37, 30)
         ws.autofilter(0, 0, len(df), len(USER_COLUMNS) - 1)
+        ws.freeze_panes(1, 2)
+
+    # Эмодзи (по серверу)
+    for it in items:
+        em, ds = it.get("em"), it["ds"]
+        if not em or not em.get("available") or em.get("empty") or em.get("table") is None:
+            continue
+        info = info_map(ds.emoji_info)
+        ws = wb.add_worksheet(_sheet_name(f"Эмодзи {ds.title}", used))
+        heads = ["№", "Эмодзи", "Тип", "Использований", "Доля", "Людей", "Из них в «только эмодзи»"]
+        for c, h in enumerate(heads):
+            ws.write_string(0, c, h, F["head"])
+        ws.set_row(0, 34)
+        for r, (key, x) in enumerate(em["table"].head(300).iterrows(), start=1):
+            _put(ws, r, 0, r, F["int"])
+            _put(ws, r, 1, label_text(key, info), F["text"])
+            _put(ws, r, 2, "кастомный" if x["kind"] == "custom" else "Unicode", F["text"])
+            _put(ws, r, 3, int(x["uses"]), F["int"])
+            _put(ws, r, 4, float(x["share"]), F["pct"])
+            _put(ws, r, 5, int(x["users"]), F["int"])
+            _put(ws, r, 6, int(x["only_uses"]), F["int"])
+        ws.set_column(0, 0, 6)
+        ws.set_column(1, 1, 34)
+        ws.set_column(2, 2, 12)
+        ws.set_column(3, 6, 15)
+        ws.autofilter(0, 0, min(len(em["table"]), 300), len(heads) - 1)
         ws.freeze_panes(1, 2)
 
     # Методика

@@ -16,6 +16,9 @@ SHEET_DATA_PREV = "data_prev"
 SHEET_DATA_REPLIES = "data_replies"
 SHEET_DATA_MENTIONS = "data_mentions"
 SHEET_DATA_REPLY_META = "data_reply_meta"
+SHEET_DATA_EMOJI = "data_emoji"
+SHEET_DATA_EMOJI_INFO = "data_emoji_info"
+SHEET_DATA_EMOJI_DAYS = "data_emoji_days"
 
 REQUIRED_SHEETS = [SHEET_SUMMARY, SHEET_DAILY, SHEET_INFO]
 

@@ -1,11 +1,10 @@
 """Этап 2: метрики сервера и пользователей. Работает только с Dataset, без Discord и сети."""
-
 import math
-
 import numpy as np
 import pandas as pd
-
 from loader import Dataset
+
+from emoji_tools import info_map, label_text
 
 LEVELS = ["низкая", "средняя", "высокая"]
 NIGHT_HOURS = 6            # ночь: часы 0..5
@@ -511,3 +510,124 @@ def user_metrics(ds: Dataset) -> pd.DataFrame:
 
     df = df.join(reply_metrics(ds, df.index))
     return df.sort_values(["messages", "name"], ascending=[False, True])
+
+# ---------- Эмодзи ----------
+
+EMOJI_MIN_MSGS = 20        # меньше сообщений — человек не попадает в «любителей эмодзи»
+EMOJI_TOP = 15             # строк в основных топах
+EMOJI_LOVERS_TOP = 10      # строк в таблице любителей
+
+def emoji_user_metrics(ds: Dataset, um: pd.DataFrame) -> pd.DataFrame:
+    """Личные эмодзи-метрики с тем же индексом, что у um. Нет данных — колонки пустые."""
+    cols = ["emoji_uses", "emoji_distinct", "emoji_only_msgs", "emoji_only_share", "emoji_per_msg",
+            "content_msgs", "content_days", "emoji_top_share"]
+    out = pd.DataFrame(index=um.index)
+    for c in cols:
+        out[c] = np.nan
+    out["emoji_top_key"] = ""
+    out["emoji_top_label"] = ""
+    if um.empty or not getattr(ds, "has_emoji", False):
+        return out
+
+    n = um["messages"].astype(float)
+    eu, ed = ds.emoji_user, ds.emoji_days
+    info = info_map(ds.emoji_info)
+
+    uses = eu.groupby("uid")["n"].sum() if len(eu) else pd.Series(dtype=float)
+    distinct = eu.groupby("uid")["key"].nunique() if len(eu) else pd.Series(dtype=float)
+    only_msgs = ed.groupby("uid")["n"].sum() if len(ed) else pd.Series(dtype=float)
+
+    out["emoji_uses"] = uses.reindex(um.index).fillna(0)
+    out["emoji_distinct"] = distinct.reindex(um.index).fillna(0)
+    om = np.minimum(only_msgs.reindex(um.index).fillna(0), n)
+    out["emoji_only_msgs"] = om
+    out["emoji_only_share"] = om / n.where(n > 0)
+    out["emoji_per_msg"] = out["emoji_uses"] / n.where(n > 0)
+    out["content_msgs"] = n - om
+
+    # Активные дни «с текстом»: в день было хотя бы одно сообщение, не состоящее только из эмодзи
+    daily = ds.daily
+    if len(daily):
+        if len(ed):
+            m = daily.merge(ed.rename(columns={"n": "eo"}), on=["uid", "date"], how="left")
+            m["eo"] = m["eo"].fillna(0)
+            cd = ((m["n"] - m["eo"]) > 0).groupby(m["uid"]).sum()
+        else:
+            cd = (daily["n"] > 0).groupby(daily["uid"]).sum()
+        out["content_days"] = cd.reindex(um.index).fillna(0)
+
+    # Любимый эмодзи
+    if len(eu):
+        top = (eu.groupby(["uid", "key"], as_index=False)["n"].sum()
+                 .sort_values(["uid", "n", "key"], ascending=[True, False, True])
+                 .drop_duplicates("uid").set_index("uid"))
+        keys = top["key"].reindex(um.index).fillna("")
+        out["emoji_top_key"] = keys.values
+        out["emoji_top_share"] = (top["n"] / uses).reindex(um.index).values
+        out["emoji_top_label"] = [label_text(k, info) if k else "" for k in keys.values]
+    return out
+
+def emoji_server_metrics(ds: Dataset, um: pd.DataFrame, sm: dict = None) -> dict:
+    """Метрики эмодзи по серверу. {'available': False} — файл старый, раздел скрывается."""
+    if not getattr(ds, "has_emoji", False):
+        return {"available": False}
+
+    eu, info = ds.emoji_user, info_map(ds.emoji_info)
+    total_msgs = int(ds.total_messages)
+    only_msgs = min(int(ds.emoji_days["n"].sum()) if len(ds.emoji_days) else 0, total_msgs)
+    uses_total = int(eu["n"].sum()) if len(eu) else 0
+
+    notes = [
+        "эмодзи считаются во всех сообщениях; «только эмодзи» — сообщение, где кроме них ничего нет",
+        "оттенки кожи, вариации и гендерные формы одного эмодзи объединены",
+        "«внешний» — кастомный эмодзи, которого нет в списке эмодзи сервера "
+        "(в суммарном файле — ни на одном из серверов бота)",
+        "реакции, стикеры и текстовые смайлы (:) ) не учитываются",
+    ]
+    if uses_total == 0 and total_msgs >= 100:
+        notes.append("эмодзи не найдено: если это неожиданно, проверьте Message Content Intent бота")
+    rel = make_rel(_lvl(total_msgs, 300, 2000), notes)
+    if sm and not sm.get("empty"):
+        rel = _cap(rel, LEVELS.index(sm["reliability"]["level"]))
+
+    out = {
+        "available": True, "empty": uses_total == 0, "rel": rel,
+        "messages": total_msgs, "uses": uses_total,
+        "only_msgs": only_msgs, "only_share": (only_msgs / total_msgs) if total_msgs else 0.0,
+        "distinct": 0, "categories": [], "table": None,
+        "top": None, "top_own": None, "top_ext": None, "top_users": None,
+        "users_with": 0, "users_with_share": 0.0, "lovers": None,
+    }
+    if "emoji_uses" in um.columns and len(um):
+        out["users_with"] = int((um["emoji_uses"] > 0).sum())
+        out["users_with_share"] = out["users_with"] / len(um)
+    if uses_total == 0:
+        return out
+
+    g = eu.groupby("key").agg(uses=("n", "sum"), users=("uid", "nunique"))
+    only_uses = eu[eu["only"] == 1].groupby("key")["n"].sum()
+    g["only_uses"] = only_uses.reindex(g.index).fillna(0).astype(int)
+    g["kind"] = ["custom" if k.startswith("c:") else "unicode" for k in g.index]
+    g["external"] = [bool(info.get(k, ("", 0, 0))[2]) for k in g.index]
+    g["share"] = g["uses"] / uses_total
+    g = g.sort_values(["uses", "users"], ascending=[False, False], kind="stable")
+
+    is_c = g["kind"] == "custom"
+    cats = [("Обычные (Unicode)", g[~is_c]),
+            ("Свои кастомные", g[is_c & ~g["external"]]),
+            ("Внешние кастомные (внешний)", g[is_c & g["external"]])]
+    out["categories"] = [(name, len(p), int(p["uses"].sum()), float(p["uses"].sum()) / uses_total)
+                         for name, p in cats]
+    out["distinct"] = len(g)
+    out["table"] = g
+    out["top"] = g.head(EMOJI_TOP)
+    out["top_own"] = g[is_c & ~g["external"]].head(10)
+    out["top_ext"] = g[is_c & g["external"]].head(10)
+    out["top_users"] = g.sort_values(["users", "uses"], ascending=[False, False],
+                                     kind="stable").head(EMOJI_TOP)
+
+    if "emoji_per_msg" in um.columns and len(um):
+        cand = um[(um["messages"] >= EMOJI_MIN_MSGS) & (um["emoji_uses"] > 0)]
+        out["lovers"] = cand.sort_values(["emoji_per_msg", "messages"],
+                                         ascending=[False, False]).head(EMOJI_LOVERS_TOP)
+    return out

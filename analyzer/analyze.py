@@ -13,7 +13,9 @@ from pathlib import Path
 
 import settings as S
 from loader import Dataset, LoaderError, discover, load_dataset
-from metrics import TREND_WINDOW, calendar_days, server_metrics, user_metrics
+from metrics import (TREND_WINDOW, calendar_days, emoji_server_metrics, emoji_user_metrics,
+                     server_metrics, user_metrics)
+from report_emoji import EmojiImages, build_server_emoji_html, build_user_emoji_html
 from report_html import build_server_html, build_user_html
 from report_xlsx import build_summary_xlsx
 from scoring import compute_skp
@@ -78,9 +80,13 @@ def make_reports(ds: Dataset, out_dir: Path, args):
     """Строит HTML (серверный + индивидуальные). Возвращает (папка, данные для сводного xlsx)."""
     sm = server_metrics(ds)
     um = user_metrics(ds)
+    if len(um):
+        um = um.join(emoji_user_metrics(ds, um))
+    em = emoji_server_metrics(ds, um, sm)
     sk = compute_skp(ds, um, args.top_n, args.min_skp) if len(um) else pd.DataFrame()
 
     used_folders = vars(args).setdefault("used_folders", set())   # общий набор на весь запуск
+    imgs = vars(args).setdefault("emoji_images", EmojiImages(enabled=not args.no_avatars))
     folder = out_dir / report_folder_name(ds, used_folders)
     (folder / "users").mkdir(parents=True, exist_ok=True)
 
@@ -92,11 +98,14 @@ def make_reports(ds: Dataset, out_dir: Path, args):
         for uid in chosen:
             fname = user_filename(um.loc[uid], uid, used)
             avatar = None if args.no_avatars else fetch_avatar(str(um.loc[uid, "avatar"]))
-            html_text = build_user_html(ds, uid, um, sk, days, avatar)
+            user_emoji = build_user_emoji_html(ds, uid, um, em, imgs)
+            html_text = build_user_html(ds, uid, um, sk, days, avatar, user_emoji)
             (folder / "users" / fname).write_text(html_text, encoding="utf-8")
             linked[uid] = fname
-    (folder / "report.html").write_text(build_server_html(ds, sm, um, sk, linked), encoding="utf-8")
-    return folder, {"ds": ds, "sm": sm, "um": um, "sk": sk}
+    server_emoji = build_server_emoji_html(ds, em, um, linked, imgs)
+    (folder / "report.html").write_text(
+        build_server_html(ds, sm, um, sk, linked, server_emoji), encoding="utf-8")
+    return folder, {"ds": ds, "sm": sm, "um": um, "sk": sk, "em": em}
 
 def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
