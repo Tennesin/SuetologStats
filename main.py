@@ -24,7 +24,6 @@ from cli import start_console
 from commands import register_commands
 from config import TOKEN, log
 
-
 class StatBot(discord.Client):
     def __init__(self):
         intents = discord.Intents.none()
@@ -41,7 +40,6 @@ class StatBot(discord.Client):
 
     async def on_ready(self):
         log.info("Бот %s запущен. Вызовите /stats на сервере или введите -help в терминале.", self.user)
-
 
 if __name__ == "__main__":
     if not TOKEN:

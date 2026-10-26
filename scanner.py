@@ -25,12 +25,10 @@ COUNTED_TYPES = {discord.MessageType.default, discord.MessageType.reply}
 running: dict[int, "ScanState"] = {}      # guild_id -> активный сбор
 background_tasks: set[asyncio.Task] = set()
 
-
 def chan_label(ch) -> str:
     if isinstance(ch, discord.Thread) and ch.parent is not None:
         return f"#{ch.parent.name} › {ch.name}"
     return f"#{ch.name}"
-
 
 # ---------- Параметры, состояние, результат ----------
 
@@ -64,14 +62,12 @@ class StaffMember:
     kind: str                  # "owner" или "admin"
     roles: list = field(default_factory=list)   # какие роли из ADMIN_ROLES у человека
 
-
 @dataclass
 class StaffInfo:
     owner_id: Optional[int] = None
     members: dict = field(default_factory=dict)          # uid -> StaffMember
     unmatched_roles: list = field(default_factory=list)  # правила из ADMIN_ROLES без совпадений
     partial: bool = False                                # список участников мог загрузиться не полностью
-
 
 @dataclass
 class ScanResult:
@@ -80,6 +76,9 @@ class ScanResult:
     heat: dict = field(default_factory=lambda: defaultdict(int))          # (weekday, hour) -> n
     user_heat: dict = field(default_factory=lambda: defaultdict(int))     # (uid, weekday, hour) -> n
     replies: dict = field(default_factory=lambda: defaultdict(int))       # uid -> n
+    reply_pairs: dict = field(default_factory=lambda: defaultdict(int))   # (кто ответил, кому) -> n
+    reply_unresolved: int = 0                                             # ответов, где адресат неизвестен
+    reply_self_or_bot: int = 0                                            # ответы себе и ботам (не учитываются)
     names: dict = field(default_factory=dict)                             # uid -> ник
     usernames: dict = field(default_factory=dict)                         # uid -> оригинальный ник
     avatars: dict = field(default_factory=dict)                           # uid -> URL аватарки
@@ -93,7 +92,6 @@ class ScanResult:
     @property
     def total(self) -> int:
         return sum(self.user_day.values())
-
 
 class ScanState:
     def __init__(self, title: str = ""):
@@ -129,7 +127,6 @@ class ScanState:
             f"• прошло: {self.elapsed()}"
         )
 
-
 def period_bounds(params: ScanParams):
     """Границы чтения. При сравнении начало сдвигается на начало предыдущего периода."""
     first = params.prev_range[0] if params.prev_range else params.start_date
@@ -140,14 +137,12 @@ def period_bounds(params: ScanParams):
     )
     return start_dt, end_dt
 
-
 def guild_start_date(guild: discord.Guild) -> date:
     """Первый день, с которого у сервера есть осмысленная история."""
     override = GUILD_START_DATES.get(guild.id)
     if override:
         return override
     return max(MIN_START_DATE, guild.created_at.astimezone(TZ).date())
-
 
 def params_for_guild(guild: discord.Guild, params: ScanParams,
                      state: ScanState) -> Optional[ScanParams]:
@@ -175,16 +170,13 @@ def params_for_guild(guild: discord.Guild, params: ScanParams,
             )
     return replace(params, start_date=new_s, compare=compare)
 
-
 # ---------- Правила исключения чатов ----------
 
 def norm_name(text: str) -> str:
     return str(text).strip().lstrip("#").strip().casefold()
 
-
 def looks_like_id(token: str) -> bool:
     return token.isdigit() and len(token) >= 17
-
 
 class ExcludeRules:
     """Набор правил: точные названия (без учёта регистра) и ID каналов."""
@@ -228,7 +220,6 @@ class ExcludeRules:
         all_labels = set(self.names.values()) | set(self.ids.values())
         return sorted(all_labels - self.hit, key=str.casefold)
 
-
 def load_store() -> dict:
     try:
         with open(EXCLUDE_FILE, "r", encoding="utf-8") as f:
@@ -240,13 +231,11 @@ def load_store() -> dict:
         log.exception("Не удалось прочитать %s", EXCLUDE_FILE)
         return {}
 
-
 def save_store(data: dict):
     tmp = EXCLUDE_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp, EXCLUDE_FILE)
-
 
 def build_rules(guild_id: int, extra_text: Optional[str]) -> ExcludeRules:
     rules = ExcludeRules()
@@ -261,7 +250,6 @@ def build_rules(guild_id: int, extra_text: Optional[str]) -> ExcludeRules:
         for tok in re.split(r"[,;\n]", extra_text):
             rules.add_token(tok)
     return rules
-
 
 # ---------- Поиск каналов ----------
 
@@ -470,6 +458,17 @@ async def scan_channels(channels, params: ScanParams, state: ScanState) -> ScanR
                     target.user_heat[(uid, local.weekday(), local.hour)] += 1
                     if m.type == discord.MessageType.reply:
                         target.replies[uid] += 1
+                        ref = m.reference.resolved if m.reference else None
+                        if isinstance(ref, discord.Message):
+                            dst = ref.author
+                            if dst.bot or dst.id == uid:
+                                target.reply_self_or_bot += 1
+                            else:
+                                target.reply_pairs[(uid, dst.id)] += 1
+                                main.names.setdefault(dst.id, dst.display_name)
+                                main.usernames.setdefault(dst.id, dst.name)
+                        else:
+                            target.reply_unresolved += 1
                     main.channel_names.setdefault(ch.id, label)
                     ts = name_ts.get(uid)
                     if ts is None or m.created_at >= ts:
@@ -498,7 +497,6 @@ async def scan_channels(channels, params: ScanParams, state: ScanState) -> ScanR
         raise
     return main
 
-
 async def progress_loop(state: ScanState, status_msg: Optional[discord.Message]):
     while True:
         await asyncio.sleep(PROGRESS_INTERVAL)
@@ -509,7 +507,6 @@ async def progress_loop(state: ScanState, status_msg: Optional[discord.Message])
                 await status_msg.edit(content=text)
             except discord.HTTPException:
                 pass
-
 
 async def scan_guild(guild: discord.Guild, params: ScanParams, bot_user_id: int,
                      state: ScanState, status_msg: Optional[discord.Message] = None) -> ScanResult:
@@ -532,7 +529,6 @@ async def scan_guild(guild: discord.Guild, params: ScanParams, bot_user_id: int,
         with suppress(asyncio.CancelledError):
             await progress_task
 
-
 # ---------- Объединение серверов ----------
 
 def _merge_into(dst: ScanResult, src: ScanResult, server: Optional[str]):
@@ -548,6 +544,10 @@ def _merge_into(dst: ScanResult, src: ScanResult, server: Optional[str]):
         dst.user_heat[key] += v
     for uid, v in src.replies.items():
         dst.replies[uid] += v
+    for key, v in src.reply_pairs.items():
+        dst.reply_pairs[key] += v
+    dst.reply_unresolved += src.reply_unresolved
+    dst.reply_self_or_bot += src.reply_self_or_bot
     for uid, nm in src.names.items():
         dst.names.setdefault(uid, nm)
     for uid, un in src.usernames.items():
@@ -557,7 +557,6 @@ def _merge_into(dst: ScanResult, src: ScanResult, server: Optional[str]):
     if server is not None:
         for cid, label in src.channel_names.items():
             dst.channel_names[cid] = f"[{server}] {label}"
-
 
 def merge_results(results):
     """results: список (guild, state, ScanResult). Возвращает (ScanResult, ScanState)."""

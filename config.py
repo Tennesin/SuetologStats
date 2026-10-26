@@ -81,7 +81,6 @@ FORMAT_LABELS = {
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("statbot")
 
-
 def load_tz(name: str) -> tzinfo:
     if name.upper() == "UTC":
         return timezone.utc
@@ -93,18 +92,15 @@ def load_tz(name: str) -> tzinfo:
             "Пример: Asia/Tashkent. На Windows сначала выполните: pip install tzdata"
         )
 
-
 TZ = load_tz(TZ_NAME)
 
 # ---------- Вспомогательные функции ----------
 
 _CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
-
 def clean(text) -> str:
     """Убирает управляющие символы, недопустимые в xlsx."""
     return _CTRL_RE.sub("", str(text))
-
 
 def parse_date(text: str) -> Optional[date]:
     try:
@@ -112,10 +108,8 @@ def parse_date(text: str) -> Optional[date]:
     except ValueError:
         return None
 
-
 def fmt_num(n: int) -> str:
     return f"{n:,}".replace(",", " ")
-
 
 def fmt_duration(seconds: float) -> str:
     seconds = int(seconds)
@@ -127,21 +121,17 @@ def fmt_duration(seconds: float) -> str:
         return f"{m} мин {s} с"
     return f"{s} с"
 
-
 def fit_name(name: str) -> str:
     return name if len(name) <= NAME_WIDTH else name[: NAME_WIDTH - 1] + "…"
-
 
 def fmt_list(items: list, limit: int = 30) -> str:
     if len(items) <= limit:
         return ", ".join(items)
     return ", ".join(items[:limit]) + f" … и ещё {len(items) - limit}"
 
-
 def safe_filename(name: str) -> str:
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip(" .")
     return name[:100] or "server"
-
 
 def save_local_copy(filename: str, data: bytes, folder: Optional[str] = None) -> str:
     folder = folder or STATS_DIR or "output"
@@ -150,7 +140,6 @@ def save_local_copy(filename: str, data: bytes, folder: Optional[str] = None) ->
     with open(path, "wb") as f:
         f.write(data)
     return path
-
 
 # ---------- Пресеты периодов ----------
 # Правило: во всех пресетах учитываются только ЗАВЕРШЁННЫЕ сутки по времени TZ,
@@ -175,22 +164,18 @@ PERIOD_PRESETS = {
 _LAST_RE = re.compile(r"^last(\d{1,3})([dwmy])$")
 _UNIT_RU = {"d": "дн.", "w": "нед.", "m": "мес.", "y": "г."}
 
-
 def today_local() -> date:
     """Сегодняшняя дата по часовому поясу TIMEZONE (а не по часам компьютера)."""
     return datetime.now(TZ).date()
-
 
 def shift_months(d: date, months: int) -> date:
     y, m0 = divmod(d.year * 12 + d.month - 1 + months, 12)
     m = m0 + 1
     return date(y, m, min(d.day, calendar.monthrange(y, m)[1]))
 
-
 def normalize_period_key(text: str) -> str:
     key = re.sub(r"[\s_]+", "", str(text).strip().lower())
     return key.replace("last-", "last")
-
 
 def resolve_period(text: str, today: Optional[date] = None):
     """Возвращает (start, end, key, label); обе даты включительно.
@@ -246,7 +231,6 @@ def resolve_period(text: str, today: Optional[date] = None):
     if s > e:
         raise ValueError(f"В периоде «{label}» пока нет завершённых суток.")
     return s, e, key, label
-
 
 def build_period(period: Optional[str], start_text: Optional[str],
                  end_text: Optional[str], compare: bool = False):

@@ -28,7 +28,6 @@ CHANGE_MIXED = 0.30              # противоположные сигналы
 def _lvl(value, mid, high) -> int:
     return 2 if value >= high else 1 if value >= mid else 0
 
-
 def make_rel(level: int, notes: list) -> dict:
     level = max(0, min(2, int(level)))
     return {"level": LEVELS[level], "notes": notes}
@@ -36,7 +35,6 @@ def make_rel(level: int, notes: list) -> dict:
 def _cap(rel: dict, cap_level: int) -> dict:
     """Не даёт достоверности раздела превысить общий уровень."""
     return make_rel(min(LEVELS.index(rel["level"]), cap_level), rel["notes"])
-
 
 def _sign(x, th: float = CHANGE_EPS) -> int:
     return 1 if x > th else -1 if x < -th else 0
@@ -52,7 +50,6 @@ def calendar_days(ds: Dataset) -> pd.DatetimeIndex:
         return pd.DatetimeIndex([])
     return pd.date_range(a, b, freq="D")
 
-
 def gini(values) -> float:
     x = np.sort(np.asarray(values, dtype=float))
     n = len(x)
@@ -61,10 +58,8 @@ def gini(values) -> float:
     cum = np.cumsum(x)
     return float((n + 1 - 2 * cum.sum() / cum[-1]) / n)
 
-
 def _top_share(desc: np.ndarray, k: int, total: float) -> float:
     return float(desc[:k].sum() / total) if total else 0.0
-
 
 def base_reliability(ds: Dataset, days_n: int, users_n: int) -> dict:
     notes, lv = [], min(_lvl(days_n, 14, 28), _lvl(ds.total_messages, 300, 2000), _lvl(users_n, 10, 30))
@@ -145,7 +140,6 @@ def _trend_block(tot: pd.Series, D: int) -> dict:
         "rel": make_rel(level, notes),
     }
 
-
 def _time_block(ds: Dataset):
     ht = ds.heat_total
     if ht is None or ht.empty or ht["n"].sum() == 0:
@@ -168,7 +162,6 @@ def _time_block(ds: Dataset):
         "rel": make_rel(_lvl(total, 300, 2000), ["часовой пояс: " + (ds.tz or "не указан")]),
     }
 
-
 def _segments(active_days: pd.Series, per_user: pd.Series, D: int) -> pd.DataFrame:
     ad = active_days.reindex(per_user.index).values
     share = ad / D
@@ -184,7 +177,6 @@ def _segments(active_days: pd.Series, per_user: pd.Series, D: int) -> pd.DataFra
                      int(msgs), msgs / total if total else 0.0))
     return pd.DataFrame(rows, columns=["segment", "users", "user_share", "messages", "message_share"]
                         ).set_index("segment")
-
 
 def server_metrics(ds: Dataset) -> dict:
     days = calendar_days(ds)
@@ -321,8 +313,52 @@ def server_metrics(ds: Dataset) -> dict:
             blk["rel"] = _cap(blk["rel"], cap)
     return out
 
-
 # ---------- Личные метрики ----------
+
+def reply_metrics(ds: Dataset, uids) -> pd.DataFrame:
+    """Метрики общения по ответам. Если данных о парах нет (старый файл) — всё NaN."""
+    num_cols = ["replies_in", "reply_sources", "replies_out_known", "reply_targets",
+                "in_weighted", "reciprocity", "top_target_share", "top_source_share"]
+    out = pd.DataFrame(index=uids)
+    for c in num_cols:
+        out[c] = np.nan
+    out["top_target"] = ""
+    out["top_source"] = ""
+
+    rp = ds.reply_pairs
+    if rp is None or rp.empty:
+        return out
+    rp = rp.copy()
+    rp["sq"] = np.sqrt(rp["n"])
+
+    inc = rp.groupby("dst").agg(replies_in=("n", "sum"), reply_sources=("src", "nunique"),
+                                in_weighted=("sq", "sum"))
+    outg = rp.groupby("src").agg(replies_out_known=("n", "sum"), reply_targets=("dst", "nunique"))
+
+    for c in ("replies_in", "reply_sources", "in_weighted"):
+        out[c] = inc[c].reindex(uids).fillna(0).values
+    for c in ("replies_out_known", "reply_targets"):
+        out[c] = outg[c].reindex(uids).fillna(0).values
+
+    # Взаимность: какая доля ответов человека ушла тем, кто хоть раз ответил ему
+    back = rp[["src", "dst", "n"]].rename(columns={"src": "dst", "dst": "src", "n": "n_back"})
+    mm = rp.merge(back, on=["src", "dst"], how="left")
+    mm["mutual"] = mm["n"].where(mm["n_back"].fillna(0) > 0, 0)
+    rec = mm.groupby("src")["mutual"].sum() / mm.groupby("src")["n"].sum()
+    out["reciprocity"] = rec.reindex(uids).values
+
+    # Главный адресат (кому он отвечает чаще всего)
+    t = (rp.sort_values(["src", "n"], ascending=[True, False])
+           .drop_duplicates("src").set_index("src"))
+    out["top_target"] = t["dst"].reindex(uids).fillna("").values
+    out["top_target_share"] = (t["n"] / outg["replies_out_known"]).reindex(uids).values
+
+    # Главный отвечающий (кто чаще всего отвечает ему)
+    s = (rp.sort_values(["dst", "n"], ascending=[True, False])
+           .drop_duplicates("dst").set_index("dst"))
+    out["top_source"] = s["src"].reindex(uids).fillna("").values
+    out["top_source_share"] = (s["n"] / inc["replies_in"]).reindex(uids).values
+    return out
 
 def user_metrics(ds: Dataset) -> pd.DataFrame:
     days = calendar_days(ds)
@@ -473,4 +509,5 @@ def user_metrics(ds: Dataset) -> pd.DataFrame:
         lv = np.maximum(lv - 1, 0)
     df["reliability"] = [LEVELS[i] for i in lv]
 
+    df = df.join(reply_metrics(ds, df.index))
     return df.sort_values(["messages", "name"], ascending=[False, True])

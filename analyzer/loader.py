@@ -19,11 +19,10 @@ HEAT_COLS = ["uid", "weekday", "hour", "n"]
 HEAT_TOTAL_COLS = ["weekday", "hour", "n"]
 SERVER_COLS = ["uid", "server", "n"]
 STAFF_COLS = ["server", "uid", "name", "kind", "roles", "n"]
-
+REPLY_COLS = ["src", "dst", "n"]
 
 class LoaderError(Exception):
     """Файл нельзя использовать (не тот формат, повреждён и т. п.)."""
-
 
 @dataclass
 class Dataset:
@@ -55,6 +54,9 @@ class Dataset:
     staff: pd.DataFrame
     warnings: list = field(default_factory=list)
     filtered: str = ""
+    reply_pairs: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=REPLY_COLS))
+    reply_unresolved: int = 0
+    reply_self_or_bot: int = 0
 
     @property
     def total_messages(self) -> int:
@@ -70,12 +72,10 @@ class Dataset:
         a, b = self.window
         return (b - a).days + 1 if a and b else 0
 
-
 # ---------- Мелкие утилиты ----------
 
 def _s(v) -> str:
     return "" if v is None else str(v).strip()
-
 
 def _to_date(v) -> Optional[date]:
     if isinstance(v, datetime):
@@ -91,7 +91,6 @@ def _to_date(v) -> Optional[date]:
                 pass
     return None
 
-
 def _to_int(v, default: int = 0) -> int:
     if v is None or v == "":
         return default
@@ -103,7 +102,6 @@ def _to_int(v, default: int = 0) -> int:
         except (TypeError, ValueError):
             return default
 
-
 def _uid(v) -> str:
     """ID пользователя как строка из цифр; пустая строка, если это не ID."""
     if isinstance(v, float) and v.is_integer():
@@ -111,16 +109,13 @@ def _uid(v) -> str:
     s = _s(v)
     return s if s.isdigit() else ""
 
-
 def _df(rows: list, cols: list) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=cols)
-
 
 def _rows(wb, name: str) -> Iterator[tuple]:
     if name not in wb.sheetnames:
         return iter(())
     return wb[name].iter_rows(values_only=True)
-
 
 def _table(wb, name: str) -> list[dict]:
     """Лист «шапка + строки» -> список словарей по именам колонок."""
@@ -131,7 +126,6 @@ def _table(wb, name: str) -> list[dict]:
     head = [_s(h) for h in head]
     return [dict(zip(head, r)) for r in it if r and any(v is not None for v in r)]
 
-
 def _to_gen_date(v) -> Optional[date]:
     """Дата из ячейки «Сформирован» (дд.мм.гггг чч:мм)."""
     t = _s(v)
@@ -141,7 +135,6 @@ def _to_gen_date(v) -> Optional[date]:
         except ValueError:
             pass
     return None
-
 
 # ---------- Разбор листов ----------
 
@@ -167,7 +160,6 @@ def parse_info(wb):
             sections[current].append(v)
     return meta, multi, sections
 
-
 def parse_summary(wb) -> list[dict]:
     """«Сводка». Шапка ищется по тексту: при баннере «сбор остановлен» она сдвигается."""
     out, started = [], False
@@ -187,7 +179,6 @@ def parse_summary(wb) -> list[dict]:
                         "role": _s(row[9])})
     return out
 
-
 def parse_daily(wb) -> pd.DataFrame:
     recs = []
     it = _rows(wb, S.SHEET_DAILY)
@@ -205,7 +196,6 @@ def parse_daily(wb) -> pd.DataFrame:
     df["date"] = pd.to_datetime(df["date"])
     return df.groupby(["uid", "date"], as_index=False)["n"].sum()
 
-
 def parse_staff(wb, default_server: str) -> pd.DataFrame:
     out, server = [], default_server
     for row in _rows(wb, S.SHEET_STAFF):
@@ -222,7 +212,6 @@ def parse_staff(wb, default_server: str) -> pd.DataFrame:
         out.append((server, uid, a, kind, "" if roles == "—" else roles, _to_int(row[4])))
     return _df(out, STAFF_COLS)
 
-
 def parse_heat_total(wb) -> pd.DataFrame:
     """Запасной вариант для старых файлов: общая тепловая карта с листа «Аналитика»."""
     rows = _rows(wb, S.SHEET_ANALYTICS)
@@ -238,7 +227,6 @@ def parse_heat_total(wb) -> pd.DataFrame:
             return _df(out, HEAT_TOTAL_COLS)
     return _df([], HEAT_TOTAL_COLS)
 
-
 # ---------- Сборка набора данных ----------
 
 def load_dataset(path: Path) -> Dataset:
@@ -250,10 +238,24 @@ def load_dataset(path: Path) -> Dataset:
         missing = [n for n in S.REQUIRED_SHEETS if n not in wb.sheetnames]
         if missing:
             raise LoaderError("в файле нет листов: " + ", ".join(missing))
-        return _build(wb, path)
+        ds = _build(wb, path)
+        _load_replies(wb, ds)
+        return ds
     finally:
         wb.close()
 
+def _load_replies(wb, ds: Dataset):
+    """Кто кому отвечал. В старых файлах листа нет: таблица остаётся пустой."""
+    if S.SHEET_DATA_REPLIES in wb.sheetnames:
+        rows = [(_uid(r.get("src")), _uid(r.get("dst")), _to_int(r.get("messages")))
+                for r in _table(wb, S.SHEET_DATA_REPLIES)]
+        rows = [r for r in rows if r[0] and r[1] and r[2] > 0]
+        ds.reply_pairs = _df(rows, REPLY_COLS)
+    if S.SHEET_DATA_REPLY_META in wb.sheetnames:
+        meta = {_s(r.get("key")): _to_int(r.get("value"))
+                for r in _table(wb, S.SHEET_DATA_REPLY_META)}
+        ds.reply_unresolved = meta.get("unresolved", 0)
+        ds.reply_self_or_bot = meta.get("self_or_bot", 0)
 
 def _build(wb, path: Path) -> Dataset:
     warnings: list[str] = []
@@ -400,7 +402,6 @@ def _build(wb, path: Path) -> Dataset:
         heat_total=heat_total, servers=servers, staff=staff, warnings=warnings,
         filtered="; ".join(flt),
     )
-
 
 # ---------- Поиск файлов ----------
 

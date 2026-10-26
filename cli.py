@@ -45,7 +45,6 @@ FLAG_OPTS = {"compare"}
 
 _cli = {"busy": False, "cancel": False}
 
-
 def parse_cli_stats(args: list[str]):
     """Возвращает (ids, all_guilds, params). Бросает ValueError."""
     ids: list[int] = []
@@ -93,7 +92,6 @@ def parse_cli_stats(args: list[str]):
         period_key=key, period_label=label, compare=compare,
     )
     return ids, all_guilds, params
-
 
 def period_slug(params: ScanParams) -> str:
     if params.period_key:
@@ -165,7 +163,6 @@ async def run_batch(bot: discord.Client, guilds: list[discord.Guild], params: Sc
     finally:
         _cli["busy"] = False
 
-
 async def handle_console_line(bot: discord.Client, line: str):
     try:
         parts = shlex.split(line)
@@ -221,7 +218,6 @@ async def handle_console_line(bot: discord.Client, line: str):
     else:
         print(f"Неизвестная команда: {cmd}. Введите -help.", flush=True)
 
-
 async def console_loop(bot: discord.Client, queue: asyncio.Queue):
     await bot.wait_until_ready()
     print(CLI_HELP, flush=True)
@@ -231,7 +227,6 @@ async def console_loop(bot: discord.Client, queue: asyncio.Queue):
             return
         if line.strip():
             await handle_console_line(bot, line.strip())
-
 
 def start_console(bot: discord.Client):
     loop = asyncio.get_running_loop()

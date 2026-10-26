@@ -47,60 +47,48 @@ summary{cursor:pointer;font-weight:600}
 
 _REL_CLASS = {"высокая": "hi", "средняя": "mid", "низкая": "lo"}
 
-
 class Raw(str):
     """Готовый HTML: не экранируется."""
-
 
 # ---------- Мелкие помощники ----------
 
 def esc(x) -> str:
     return html.escape(str(x), quote=True)
 
-
 def _bad(x) -> bool:
     return x is None or (isinstance(x, float) and x != x)
-
 
 def num(x, d: int = 0) -> str:
     if _bad(x):
         return "—"
     return f"{x:,.{d}f}".replace(",", " ")
 
-
 def pct(x, sign: bool = False) -> str:
     if _bad(x):
         return "—"
     return f"{x * 100:+.1f}%" if sign else f"{x * 100:.1f}%"
 
-
 def badge(level: str) -> str:
     return f'<span class="badge b-{_REL_CLASS.get(level, "lo")}">{esc(level)}</span>'
 
-
 def ul(items) -> str:
     return "<ul>" + "".join(f"<li>{esc(i)}</li>" for i in items) + "</ul>"
-
 
 def h2(text: str, rel=None) -> str:
     extra = f' <span class="muted">достоверность:</span> {badge(rel["level"])}' if rel else ""
     return f"<h2>{esc(text)}{extra}</h2>"
 
-
 def card(label, value, hint: str = "") -> str:
     h = f'<div class="h">{esc(hint)}</div>' if hint else ""
     return f'<div class="card"><div class="l">{esc(label)}</div><div class="v">{esc(value)}</div>{h}</div>'
-
 
 def img(png, alt: str) -> str:
     if png is None:
         return ""
     return f'<img alt="{esc(alt)}" src="data:image/png;base64,{C.b64(png)}">'
 
-
 def _cell(v) -> str:
     return str(v) if isinstance(v, Raw) else esc(v)
-
 
 def table(headers, rows, num_cols=()) -> str:
     th = "".join(
@@ -113,7 +101,6 @@ def table(headers, rows, num_cols=()) -> str:
         for r in rows)
     return f'<div class="tblwrap"><table><tr>{th}</tr>{body}</table></div>'
 
-
 def page(title: str, body: str) -> str:
     stamp = datetime.now().strftime("%d.%m.%Y %H:%M")
     return (
@@ -122,7 +109,6 @@ def page(title: str, body: str) -> str:
         f"<title>{esc(title)}</title><style>{CSS}</style></head><body><div class=\"wrap\">"
         f'{body}<p class="muted">Сформировано: {stamp}</p></div></body></html>'
     )
-
 
 def _link(uid, name, linked, prefix: str = "users/"):
     if uid in linked:
@@ -161,7 +147,6 @@ def _trend_lines(tr) -> list:
         lines.append("Сигналы разных периодов противоположны: делать вывод о направлении рано.")
     return lines
 
-
 def _trend_hint(r) -> str:
     t = r["trend"]
     if t == "пачками":
@@ -171,7 +156,6 @@ def _trend_hint(r) -> str:
     if t == "притих":
         return f"нет сообщений {int(r['days_since_last'])} дн."
     return ""
-
 
 def method_html() -> str:
     W = S.SKP_WEIGHTS
@@ -194,7 +178,6 @@ def method_html() -> str:
 {S.RISK_WEIGHTS['decline'] * 100:.0f}% — снижение темпа во второй половине окна, {S.RISK_WEIGHTS['streak'] * 100:.0f}% — прерванная серия активных дней. Показывается только для выбранных пользователей.</p>
 <p class="muted">Веса и пороги заданы экспертно и пока не проверялись на эталонных данных. СКП сравнивает людей внутри одного сервера за выбранный период; это не оценка человека и не основание для санкций. При короткой истории все выводы ориентировочные.</p>
 </div></details>"""
-
 
 # ---------- Отчёт по серверу ----------
 
@@ -372,7 +355,6 @@ def build_server_html(ds, sm, um, sk, linked) -> str:
 
     return page(f"{ds.title} — анализ", "".join(b))
 
-
 # ---------- Индивидуальный отчёт ----------
 
 def _explain(ds, um, uid, r, D) -> dict:
@@ -392,6 +374,62 @@ def _explain(ds, um, uid, r, D) -> dict:
         "P": r["role"] or "без роли администрации",
     }
 
+def _reply_section(ds, uid, r) -> str:
+    """Раздел «Общение»: кому отвечает и кто отвечает ему."""
+    rp = ds.reply_pairs
+    if rp is None or rp.empty:
+        return ""
+    out_df = rp[rp["src"] == uid]
+    in_df = rp[rp["dst"] == uid]
+    if out_df.empty and in_df.empty:
+        return ""
+
+    names = ds.users.drop_duplicates("uid").set_index("uid")["name"].to_dict()
+
+    def nm(u):
+        return names.get(u) or u
+
+    out_total, in_total = int(out_df["n"].sum()), int(in_df["n"].sum())
+    my_to = dict(zip(out_df["dst"], out_df["n"]))      # сколько он ответил каждому
+    to_me = dict(zip(in_df["src"], in_df["n"]))        # сколько каждый ответил ему
+    msgs = max(int(r["messages"]), 1)
+
+    parts = [h2("Общение (ответы)")]
+    parts.append('<div class="cards">' + "".join([
+        card("Получено ответов", num(in_total), f"от {in_df['src'].nunique()} чел."),
+        card("Ответил(а) сам(а)", num(out_total), f"{out_df['dst'].nunique()} адресатов"),
+        card("Ответов на 1 сообщение", num(in_total / msgs, 2)),
+        card("Взаимность", pct(r["reciprocity"]), "ответы тем, кто отвечал ему"),
+    ]) + "</div>")
+
+    if not out_df.empty:
+        parts.append("<h3>Кому отвечает чаще всего</h3>")
+        top = out_df.sort_values("n", ascending=False).head(8)
+        parts.append(table(
+            ["Пользователь", "Ответов", "Доля его ответов", "Ответил(а) ему в ответ"],
+            [[nm(x.dst), int(x.n), pct(x.n / out_total), int(to_me.get(x.dst, 0))]
+             for x in top.itertuples()],
+            num_cols=(1, 2, 3)))
+
+    if not in_df.empty:
+        parts.append("<h3>Кто отвечает ему чаще всего</h3>")
+        top = in_df.sort_values("n", ascending=False).head(8)
+        parts.append(table(
+            ["Пользователь", "Ответов ему", "Доля всех ответов ему", "Он(а) ответил(а) в ответ"],
+            [[nm(x.src), int(x.n), pct(x.n / in_total), int(my_to.get(x.src, 0))]
+             for x in top.itertuples()],
+            num_cols=(1, 2, 3)))
+
+    known = int(rp["n"].sum())
+    lost = ds.reply_unresolved + ds.reply_self_or_bot
+    total_all = known + lost
+    if total_all:
+        parts.append(
+            f'<p class="muted">Учтены ответы, где известен адресат: {num(known)} из {num(total_all)} '
+            f"({pct(known / total_all)}) по серверу. Не учитываются: ответы на удалённые или "
+            "недоступные сообщения, ответы самому себе и ботам. Сообщения, написанные без кнопки "
+            "«Ответить», здесь тоже не видны, поэтому цифры — нижняя оценка общения.</p>")
+    return "".join(parts)
 
 def build_user_html(ds, uid, um, sk, days, avatar=None) -> str:
     r, s = um.loc[uid], sk.loc[uid]
@@ -496,4 +534,5 @@ def build_user_html(ds, uid, um, sk, days, avatar=None) -> str:
             if len(mine_ch) > 8:
                 b.append(f'<p class="muted">Показаны 8 из {len(mine_ch)} каналов.</p>')
 
+    b.append(_reply_section(ds, uid, r))
     return page(f"{r['name']} — индивидуальный отчёт", "".join(b))

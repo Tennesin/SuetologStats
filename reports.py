@@ -28,7 +28,6 @@ MODE_TITLES = {
     "months": "по месяцам",
 }
 
-
 # ---------- Агрегация ----------
 
 @dataclass
@@ -78,7 +77,6 @@ def aggregate(params: ScanParams, result: ScanResult) -> Agg:
     return Agg(order, totals, per_user, names, result.usernames, result.merged,
                result.staff, result.staff_servers)
 
-
 def period_text(params: ScanParams) -> str:
     s = params.start_date.strftime(DATE_FMT) if params.start_date else "с начала истории"
     e = params.end_date.strftime(DATE_FMT) if params.end_date else "по сегодня"
@@ -86,18 +84,15 @@ def period_text(params: ScanParams) -> str:
         return f"{params.period_label} ({s} — {e})"
     return f"{s} — {e}"
 
-
 def prev_period_text(params: ScanParams) -> str:
     pr = params.prev_range
     return f"{pr[0].strftime(DATE_FMT)} — {pr[1].strftime(DATE_FMT)}" if pr else ""
-
 
 def staff_blocks(result: ScanResult, guild_name: str) -> list:
     """[(название сервера, StaffInfo)] — один блок для сервера или по блоку на каждый в сумме."""
     if result.staff_servers:
         return list(result.staff_servers.items())
     return [(guild_name, result.staff)] if result.staff else []
-
 
 def staff_rows(agg: Agg, result: ScanResult, srv: str, info):
     """Сортировка: основатель первым, затем админы по убыванию сообщений.
@@ -112,7 +107,6 @@ def staff_rows(agg: Agg, result: ScanResult, srv: str, info):
     rows.sort(key=lambda r: (r[1].kind != "owner", -r[2], r[1].name.casefold()))
     return rows, total
 
-
 def staff_label(mb) -> str:
     return f"{mb.name} [{mb.username}]" if mb.username else mb.name
 
@@ -125,7 +119,6 @@ def bucket_of(day: date, mode: str) -> date:
         return day.replace(day=1)
     return day
 
-
 def next_bucket(b: date, mode: str) -> date:
     if mode == "days":
         return b + timedelta(days=1)
@@ -133,14 +126,12 @@ def next_bucket(b: date, mode: str) -> date:
         return b + timedelta(days=7)
     return (b.replace(day=28) + timedelta(days=4)).replace(day=1)
 
-
 def make_buckets(first: date, last: date, mode: str) -> list[date]:
     out, b, end = [], bucket_of(first, mode), bucket_of(last, mode)
     while b <= end:
         out.append(b)
         b = next_bucket(b, mode)
     return out
-
 
 def pick_detail(requested: str, first: date, last: date):
     span = (last - first).days + 1
@@ -155,7 +146,6 @@ def pick_detail(requested: str, first: date, last: date):
         reason = f"укрупнено, чтобы матрица не вышла за {MAX_MATRIX_COLS} столбцов"
         buckets = make_buckets(first, last, mode)
     return mode, buckets, reason
-
 
 # ---------- Excel ----------
 
@@ -184,7 +174,6 @@ def make_formats(wb):
         "note": wb.add_format({"italic": True, "font_color": "#666666"}),
         "wrap": wb.add_format({"text_wrap": True, "valign": "top"}),
     }
-
 
 def sheet_summary(wb, F, agg: Agg, params, state, name_w):
     order, totals, per_user = agg.order, agg.totals, agg.per_user
@@ -231,7 +220,6 @@ def sheet_summary(wb, F, agg: Agg, params, state, name_w):
     else:
         ws.write_string(top + 1, 1, "Сообщений за выбранный период не найдено.")
     ws.freeze_panes(top + 1, 2)
-
 
 def sheet_matrix(wb, F, agg: Agg, params, name_w) -> str:
     order, totals, per_user = agg.order, agg.totals, agg.per_user
@@ -281,7 +269,6 @@ def sheet_matrix(wb, F, agg: Agg, params, name_w) -> str:
     wm.freeze_panes(1, 2)
     return f"{MODE_TITLES[mode]}; {reason}; столбцов: {len(buckets)}"
 
-
 def sheet_daily(wb, F, agg: Agg, name_w) -> bool:
     wl = wb.add_worksheet("По дням (список)")
     for c, h in enumerate(["Пользователь", "ID", "Дата", "Сообщений"]):
@@ -307,7 +294,6 @@ def sheet_daily(wb, F, agg: Agg, name_w) -> bool:
     wl.autofilter(0, 0, max(r, 1), 3)
     wl.freeze_panes(1, 0)
     return truncated
-
 
 def sheet_analytics(wb, F, agg: Agg, result: ScanResult, params: ScanParams, name_w):
     ws = wb.add_worksheet("Аналитика")
@@ -508,7 +494,6 @@ def sheet_analytics(wb, F, agg: Agg, result: ScanResult, params: ScanParams, nam
             ws.write_string(row, 0, f"… показаны первые 25 серверов из {len(servers)}", F["note"])
             row += 1
 
-
 def sheet_staff(wb, F, agg: Agg, result: ScanResult, guild_name: str, name_w):
     ws = wb.add_worksheet("Администрация")
     ws.set_column(0, 0, max(name_w, 30))
@@ -561,7 +546,6 @@ def sheet_staff(wb, F, agg: Agg, result: ScanResult, guild_name: str, name_w):
             row += 1
         row += 1
 
-
 def sheet_data(wb, agg: Agg, result: ScanResult):
     """Скрытые машиночитаемые листы для автономного анализатора: полные данные без обрезаний.
     ID пишутся строкой: числа в Excel теряют точность после 15 цифр."""
@@ -605,6 +589,17 @@ def sheet_data(wb, agg: Agg, result: ScanResult):
         ["uid", "weekday", "hour", "messages"],
         ((str(u), wd, hr, n) for (u, wd, hr), n in result.user_heat.items()),
     )
+    table(
+        "data_replies",
+        ["src", "dst", "messages"],
+        ((str(a), str(b), n) for (a, b), n in result.reply_pairs.items()),
+    )
+    table(
+        "data_reply_meta",
+        ["key", "value"],
+        [("unresolved", result.reply_unresolved),
+         ("self_or_bot", result.reply_self_or_bot)],
+    )
     if result.user_server:
         table(
             "data_servers",
@@ -617,7 +612,6 @@ def sheet_data(wb, agg: Agg, result: ScanResult):
             ["uid", "date", "messages"],
             ((str(u), d.isoformat(), n) for (u, d), n in result.prev.user_day.items()),
         )
-
 
 def sheet_info(wb, F, guild_name, params, state, matrix_note, truncated, merged=False):
     wi = wb.add_worksheet("Служебное")
@@ -677,7 +671,6 @@ def sheet_info(wb, F, guild_name, params, state, matrix_note, truncated, merged=
     section("Нет доступа", state.skipped)
     section("Ошибки чтения", state.failed)
 
-
 def build_xlsx(guild_name: str, params: ScanParams, state: ScanState, result: ScanResult) -> bytes:
     agg = aggregate(params, result)
     buf = io.BytesIO()
@@ -700,7 +693,6 @@ def build_xlsx(guild_name: str, params: ScanParams, state: ScanState, result: Sc
 
     wb.close()
     return buf.getvalue()
-
 
 # ---------- Текстовый отчёт ----------
 

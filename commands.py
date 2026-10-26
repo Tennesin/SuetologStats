@@ -21,7 +21,6 @@ from scanner import (
     norm_name, running, save_store, scan_guild,
 )
 
-
 def is_allowed(interaction: discord.Interaction) -> bool:
     if ALLOWED_USER_ID:
         return interaction.user.id == ALLOWED_USER_ID
@@ -29,7 +28,6 @@ def is_allowed(interaction: discord.Interaction) -> bool:
         isinstance(interaction.user, discord.Member)
         and interaction.user.guild_permissions.administrator
     )
-
 
 # ---------- Доставка ----------
 
@@ -59,7 +57,6 @@ async def send_with_fallback(user, channel, content: str,
                 log.exception("Не удалось отправить файл %s (%s)", item[0], kind)
         return kind
     return None
-
 
 async def deliver(guild, requester, channel, params: ScanParams, state: ScanState, result):
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -138,7 +135,6 @@ async def run_scan(guild, requester, channel, params: ScanParams, state: ScanSta
         if status_msg is not None:
             with suppress(discord.HTTPException):
                 await status_msg.edit(content=f"{final_text} (заняло {state.elapsed()})")
-
 
 # ---------- /stats и /cancel ----------
 
@@ -248,7 +244,6 @@ async def stats(
         running.pop(guild.id, None)
         raise
 
-
 @stats.autocomplete("period")
 async def stats_period_autocomplete(interaction: discord.Interaction, current: str):
     cur = current.strip().lower()
@@ -263,7 +258,6 @@ async def stats_period_autocomplete(interaction: discord.Interaction, current: s
             _s, _e, k, label = resolve_period(key)
             out.insert(0, app_commands.Choice(name=f"{k} — {label}"[:100], value=k))
     return out[:25]
-
 
 @app_commands.command(name="cancel", description="Остановить текущий сбор (отчёт будет неполным)")
 @app_commands.guild_only()
@@ -281,7 +275,6 @@ async def cancel(interaction: discord.Interaction):
         "Останавливаю. Пришлю то, что успел собрать.", ephemeral=True
     )
 
-
 # ---------- /exclude ----------
 
 exclude_group = app_commands.Group(
@@ -291,13 +284,11 @@ exclude_group = app_commands.Group(
     default_permissions=discord.Permissions(administrator=True),
 )
 
-
 def _stored_label(entry: dict) -> str:
     name = entry.get("name") or ""
     if entry.get("id"):
         return f"{name} (ID {entry['id']})" if name else f"ID {entry['id']}"
     return name
-
 
 @exclude_group.command(name="add", description="Добавить чат в постоянный список исключений")
 @app_commands.describe(name="Точное название канала/ветки или его ID (подсказки — при вводе)")
@@ -346,7 +337,6 @@ async def exclude_add(interaction: discord.Interaction, name: str):
         f"Добавлено в исключения: {_stored_label(entry)}.{extra}", ephemeral=True
     )
 
-
 @exclude_add.autocomplete("name")
 async def exclude_add_autocomplete(interaction: discord.Interaction, current: str):
     if not is_allowed(interaction) or interaction.guild is None:
@@ -361,7 +351,6 @@ async def exclude_add_autocomplete(interaction: discord.Interaction, current: st
             if len(out) >= 25:
                 break
     return out
-
 
 @exclude_group.command(name="remove", description="Убрать чат из постоянного списка исключений")
 @app_commands.describe(name="Название или ID из списка (/exclude list)")
@@ -390,7 +379,6 @@ async def exclude_remove(interaction: discord.Interaction, name: str):
         "Убрано из исключений: " + ", ".join(_stored_label(e) for e in removed), ephemeral=True
     )
 
-
 @exclude_remove.autocomplete("name")
 async def exclude_remove_autocomplete(interaction: discord.Interaction, current: str):
     if not is_allowed(interaction) or interaction.guild is None:
@@ -404,7 +392,6 @@ async def exclude_remove_autocomplete(interaction: discord.Interaction, current:
             if len(out) >= 25:
                 break
     return out
-
 
 @exclude_group.command(name="list", description="Показать, какие чаты сейчас пропускаются")
 async def exclude_list(interaction: discord.Interaction):
@@ -423,7 +410,6 @@ async def exclude_list(interaction: discord.Interaction):
     )
     await interaction.response.send_message(text[:1900], ephemeral=True)
 
-
 # ---------- Регистрация ----------
 
 async def on_app_command_error(interaction: discord.Interaction,
@@ -437,7 +423,6 @@ async def on_app_command_error(interaction: discord.Interaction,
             await interaction.response.send_message(msg, ephemeral=True)
     except discord.HTTPException:
         pass
-
 
 def register_commands(bot: discord.Client):
     """Подключает все слеш-команды к дереву команд бота (bot.tree)."""
