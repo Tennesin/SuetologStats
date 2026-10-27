@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta
 import xlsxwriter
 
 from config import (
-    DATE_FMT, MAX_LIST_ROWS, MAX_MATRIX_COLS, NAME_WIDTH, SORT_LABELS, TZ, TZ_NAME,
+    DATE_FMT, MAX_LIST_ROWS, MAX_MATRIX_COLS, NAME_WIDTH, REACTION_LABELS, SORT_LABELS, TZ, TZ_NAME,
     clean, fit_name, fmt_list, fmt_num,
 )
 from scanner import ScanParams, ScanResult, ScanState, chan_label
@@ -620,6 +620,47 @@ def sheet_data(wb, agg: Agg, result: ScanResult):
         ["uid", "date", "messages"],
         ((str(u), d.isoformat(), n) for (u, d), n in result.emoji_only_day.items()),
     )
+
+    # Реакции (схема 4). Нет листа data_reaction_meta — реакции не собирались.
+    if result.reaction_mode != "off":
+        def reaction_rows():
+            for (u, key), n in result.reaction_recv.items():
+                yield (str(u), key, "recv", n)
+            for (u, key), n in result.reaction_given.items():
+                yield (str(u), key, "given", n)
+
+        table(
+            "data_reaction_meta",
+            ["key", "value"],
+            [("mode", 2 if result.reaction_mode == "full" else 1),
+             ("self_or_bot", result.reaction_self_or_bot),
+             ("unattributed", result.reaction_unattributed),
+             ("capped", result.reaction_capped),
+             ("errors", result.reaction_errors)],
+        )
+        table(
+            "data_reactions",
+            ["uid", "emoji", "direction", "uses"],
+            reaction_rows(),
+        )
+        table(
+            "data_reaction_msgs",
+            ["uid", "messages"],
+            ((str(u), n) for u, n in result.reaction_msgs.items()),
+        )
+        table(
+            "data_reaction_pairs",
+            ["src", "dst", "messages"],      # «messages» = число реакций; имя колонки общее с data_replies
+            ((str(a), str(b), n) for (a, b), n in result.reaction_pairs.items()),
+        )
+        rx_users = ({u for (u, _k) in result.reaction_given}
+                    | {u for pair in result.reaction_pairs for u in pair})
+        table(
+            "data_reaction_users",
+            ["uid", "name", "username"],
+            ((str(u), agg.names.get(u, str(u)), agg.usernames.get(u, "")) for u in sorted(rx_users)),
+        )
+
     if result.user_server:
         table(
             "data_servers",
@@ -640,7 +681,7 @@ def sheet_info(wb, F, guild_name, params, state, matrix_note, truncated, merged=
     info = [
         ("Сервер", guild_name),
         ("Период", period_text(params)),
-        ("Схема данных", "3"),
+        ("Схема данных", "4"),
         ("Период: начало (ISO)", params.start_date.isoformat() if params.start_date else "нет"),
         ("Период: конец (ISO)", params.end_date.isoformat() if params.end_date else "нет"),
         ("Суммарный файл", "да" if merged else "нет"),
@@ -659,7 +700,12 @@ def sheet_info(wb, F, guild_name, params, state, matrix_note, truncated, merged=
         ("Просмотрено сообщений", fmt_num(state.seen)),
         ("Учтено сообщений", fmt_num(state.counted)),
         ("Что считается", "Обычные сообщения и ответы людей; боты и системные сообщения не учитываются."),
+        ("Реакции", REACTION_LABELS.get(params.reactions, params.reactions)),
     ]
+    if params.reactions != "off":
+        info.append(("Сообщений с реакциями", fmt_num(state.reaction_msgs)))
+        if params.reactions == "full":
+            info.append(("Запросов «кто поставил реакцию»", fmt_num(state.reaction_requests)))
     if params.compare:
         info.append(("Про просмотренные", "Счётчики сообщений включают и предыдущий период (его тоже приходится читать)."))
     if state.cancelled:

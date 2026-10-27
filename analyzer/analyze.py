@@ -14,8 +14,9 @@ from pathlib import Path
 import settings as S
 from loader import Dataset, LoaderError, discover, load_dataset
 from metrics import (TREND_WINDOW, calendar_days, emoji_server_metrics, emoji_user_metrics,
-                     server_metrics, user_metrics)
+                     reaction_server_metrics, reaction_user_metrics, server_metrics, user_metrics)
 from report_emoji import EmojiImages, build_server_emoji_html, build_user_emoji_html
+from report_reactions import build_server_reactions_html, build_user_reactions_html
 from report_html import build_server_html, build_user_html
 from report_xlsx import build_summary_xlsx
 from scoring import compute_skp
@@ -82,7 +83,9 @@ def make_reports(ds: Dataset, out_dir: Path, args):
     um = user_metrics(ds)
     if len(um):
         um = um.join(emoji_user_metrics(ds, um))
+        um = um.join(reaction_user_metrics(ds, um))
     em = emoji_server_metrics(ds, um, sm)
+    rx = reaction_server_metrics(ds, um, sm)
     sk = compute_skp(ds, um, args.top_n, args.min_skp) if len(um) else pd.DataFrame()
 
     used_folders = vars(args).setdefault("used_folders", set())   # общий набор на весь запуск
@@ -98,14 +101,17 @@ def make_reports(ds: Dataset, out_dir: Path, args):
         for uid in chosen:
             fname = user_filename(um.loc[uid], uid, used)
             avatar = None if args.no_avatars else fetch_avatar(str(um.loc[uid, "avatar"]))
-            user_emoji = build_user_emoji_html(ds, uid, um, em, imgs)
+            # Блок реакций стоит сразу после блока эмодзи (оба передаются одним HTML-фрагментом)
+            user_emoji = (build_user_emoji_html(ds, uid, um, em, imgs)
+                          + build_user_reactions_html(ds, uid, um, rx, imgs))
             html_text = build_user_html(ds, uid, um, sk, days, avatar, user_emoji)
             (folder / "users" / fname).write_text(html_text, encoding="utf-8")
             linked[uid] = fname
-    server_emoji = build_server_emoji_html(ds, em, um, linked, imgs)
+    server_emoji = (build_server_emoji_html(ds, em, um, linked, imgs)
+                    + build_server_reactions_html(ds, rx, um, linked, imgs))
     (folder / "report.html").write_text(
         build_server_html(ds, sm, um, sk, linked, server_emoji), encoding="utf-8")
-    return folder, {"ds": ds, "sm": sm, "um": um, "sk": sk, "em": em}
+    return folder, {"ds": ds, "sm": sm, "um": um, "sk": sk, "em": em, "rx": rx}
 
 def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):

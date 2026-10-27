@@ -64,6 +64,11 @@ USER_COLUMNS = [
     ("Доля «только эмодзи»", "emoji_only_share", "pct"),
     ("Сообщений с текстом", "content_msgs", "int"), ("Активных дней с текстом", "content_days", "int"),
     ("Любимый эмодзи", "emoji_top_label", "text"),
+    ("Реакций получено", "rx_recv", "int"), ("Сообщений с реакциями", "rx_msgs", "int"),
+    ("Доля сообщений с реакциями", "rx_msg_share", "pct"), ("Реакций на сообщение", "rx_per_msg", "dec"),
+    ("Любимая полученная реакция", "rx_top_label", "text"),
+    ("Реакций поставлено", "rx_given", "int"), ("Ставил(а) реакции людям", "rx_given_targets", "int"),
+    ("Любимая поставленная реакция", "rx_given_top_label", "text"),
 ]
 
 METHOD_LINES = [
@@ -155,6 +160,10 @@ def build_summary_xlsx(items: list, path):
         ws.set_column(30, 30, 28)
         ws.set_column(31, 36, 14)
         ws.set_column(37, 37, 30)
+        ws.set_column(38, 41, 14)
+        ws.set_column(42, 42, 30)
+        ws.set_column(43, 44, 14)
+        ws.set_column(45, 45, 30)
         ws.autofilter(0, 0, len(df), len(USER_COLUMNS) - 1)
         ws.freeze_panes(1, 2)
 
@@ -183,6 +192,42 @@ def build_summary_xlsx(items: list, path):
         ws.set_column(3, 6, 15)
         ws.autofilter(0, 0, min(len(em["table"]), 300), len(heads) - 1)
         ws.freeze_panes(1, 2)
+
+    # Реакции (по серверу)
+    for it in items:
+        rx, ds = it.get("rx"), it["ds"]
+        if not rx or not rx.get("available") or rx.get("empty") or rx.get("table") is None:
+            continue
+        info = info_map(ds.emoji_info)
+        full = rx["full"]
+        ws = wb.add_worksheet(_sheet_name(f"Реакции {ds.title}", used))
+        heads = ["№", "Эмодзи", "Тип", "Реакций", "Доля", "Получателей", "В тексте сообщений"]
+        if full:
+            heads.append("Поставили (людей)")
+        for c, h in enumerate(heads):
+            ws.write_string(0, c, h, F["head"])
+        ws.set_row(0, 34)
+        shown = rx["table"].head(300)
+        for r, (key, x) in enumerate(shown.iterrows(), start=1):
+            _put(ws, r, 0, r, F["int"])
+            _put(ws, r, 1, label_text(key, info), F["text"])
+            _put(ws, r, 2, "кастомный" if x["kind"] == "custom" else "Unicode", F["text"])
+            _put(ws, r, 3, int(x["uses"]), F["int"])
+            _put(ws, r, 4, float(x["share"]), F["pct"])
+            _put(ws, r, 5, int(x["users"]), F["int"])
+            _put(ws, r, 6, int(x["text_uses"]), F["int"])
+            if full:
+                _put(ws, r, 7, int(x["givers"]) if "givers" in x.index else None, F["int"])
+        ws.set_column(0, 0, 6)
+        ws.set_column(1, 1, 34)
+        ws.set_column(2, 2, 12)
+        ws.set_column(3, 7, 16)
+        ws.autofilter(0, 0, len(shown), len(heads) - 1)
+        ws.freeze_panes(1, 2)
+        note_row = len(shown) + 2
+        ws.write_string(note_row, 1, "Как читать:", F["wrap"])
+        for k, line in enumerate(rx["rel"]["notes"], start=1):
+            ws.write_string(note_row + k, 1, "• " + line)
 
     # Методика
     ws = wb.add_worksheet(_sheet_name("Методика", used))

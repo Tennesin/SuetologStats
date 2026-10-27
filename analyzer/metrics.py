@@ -631,3 +631,175 @@ def emoji_server_metrics(ds: Dataset, um: pd.DataFrame, sm: dict = None) -> dict
         out["lovers"] = cand.sort_values(["emoji_per_msg", "messages"],
                                          ascending=[False, False]).head(EMOJI_LOVERS_TOP)
     return out
+
+# ---------- Реакции ----------
+
+REACTION_MIN_MSGS = 20        # меньше сообщений — человек не попадает в рейтинг «реакций на сообщение»
+REACTION_TOP = 15             # строк в основных топах эмодзи
+REACTION_PEOPLE_TOP = 10      # строк в таблицах людей
+
+def names_map(ds: Dataset) -> dict:
+    """uid -> имя: сначала авторы сообщений, затем люди, которые только ставили реакции."""
+    names = {}
+    if len(ds.users):
+        names = ds.users.drop_duplicates("uid").set_index("uid")["name"].to_dict()
+    for u, nm in getattr(ds, "reaction_names", {}).items():
+        if not names.get(u):
+            names[u] = nm
+    return names
+
+def reaction_user_metrics(ds: Dataset, um: pd.DataFrame) -> pd.DataFrame:
+    """Личные метрики реакций с тем же индексом, что у um. Нет данных — колонки пустые (NaN)."""
+    num_cols = ["rx_recv", "rx_msgs", "rx_msg_share", "rx_per_msg", "rx_distinct", "rx_top_share",
+                "rx_given", "rx_given_distinct", "rx_given_targets"]
+    out = pd.DataFrame(index=um.index)
+    for c in num_cols:
+        out[c] = np.nan
+    for c in ("rx_top_key", "rx_top_label", "rx_given_top_key", "rx_given_top_label"):
+        out[c] = ""
+    if um.empty or not getattr(ds, "has_reactions", False):
+        return out
+
+    n = um["messages"].astype(float)
+    info = info_map(ds.emoji_info)
+    rc, rm = ds.reaction_recv, ds.reaction_msgs
+
+    recv = rc.groupby("uid")["n"].sum() if len(rc) else pd.Series(dtype=float)
+    distinct = rc.groupby("uid")["key"].nunique() if len(rc) else pd.Series(dtype=float)
+    msgs = rm.groupby("uid")["n"].sum() if len(rm) else pd.Series(dtype=float)
+
+    out["rx_recv"] = recv.reindex(um.index).fillna(0)
+    out["rx_distinct"] = distinct.reindex(um.index).fillna(0)
+    mm = np.minimum(msgs.reindex(um.index).fillna(0), n)
+    out["rx_msgs"] = mm
+    out["rx_msg_share"] = mm / n.where(n > 0)
+    out["rx_per_msg"] = out["rx_recv"] / n.where(n > 0)
+
+    if len(rc):
+        top = (rc.sort_values(["uid", "n", "key"], ascending=[True, False, True])
+                 .drop_duplicates("uid").set_index("uid"))
+        keys = top["key"].reindex(um.index).fillna("")
+        out["rx_top_key"] = keys.values
+        out["rx_top_share"] = (top["n"] / recv).reindex(um.index).values
+        out["rx_top_label"] = [label_text(k, info) if k else "" for k in keys.values]
+
+    if ds.reactions_full:
+        gv, pr = ds.reaction_given, ds.reaction_pairs
+        given = gv.groupby("uid")["n"].sum() if len(gv) else pd.Series(dtype=float)
+        g_distinct = gv.groupby("uid")["key"].nunique() if len(gv) else pd.Series(dtype=float)
+        targets = pr.groupby("src")["dst"].nunique() if len(pr) else pd.Series(dtype=float)
+        out["rx_given"] = given.reindex(um.index).fillna(0)
+        out["rx_given_distinct"] = g_distinct.reindex(um.index).fillna(0)
+        out["rx_given_targets"] = targets.reindex(um.index).fillna(0)
+        if len(gv):
+            top = (gv.sort_values(["uid", "n", "key"], ascending=[True, False, True])
+                     .drop_duplicates("uid").set_index("uid"))
+            keys = top["key"].reindex(um.index).fillna("")
+            out["rx_given_top_key"] = keys.values
+            out["rx_given_top_label"] = [label_text(k, info) if k else "" for k in keys.values]
+    return out
+
+def reaction_server_metrics(ds: Dataset, um: pd.DataFrame, sm: dict = None) -> dict:
+    """Метрики реакций по серверу. {'available': False} — реакции не собирались, раздел скрывается."""
+    if not getattr(ds, "has_reactions", False):
+        return {"available": False}
+
+    rc, info = ds.reaction_recv, info_map(ds.emoji_info)
+    full = bool(ds.reactions_full)
+    total_msgs = int(ds.total_messages)
+    uses = int(rc["n"].sum()) if len(rc) else 0
+    msgs_with = int(ds.reaction_msgs["n"].sum()) if len(ds.reaction_msgs) else 0
+    msgs_with = min(msgs_with, total_msgs)
+
+    notes = [
+        "реакции — снимок на момент сбора: время реакции неизвестно, поэтому они привязаны ко дню сообщения",
+        "у свежих сообщений реакций накопилось меньше, чем у старых: сравнивать начало и конец окна нельзя",
+        "реакции на сообщения ботов, системные сообщения и уже снятые реакции не учитываются",
+        "оттенки кожи, вариации и гендерные формы одного эмодзи объединены; "
+        "«внешний» — кастомный эмодзи, которого нет в списке эмодзи сервера",
+    ]
+    if full:
+        notes.append(f"режим «полный»: реакции ботов и самореакции исключены (их было {ds.reaction_self_or_bot})")
+        if ds.reaction_unattributed:
+            notes.append(f"у {ds.reaction_unattributed} реакций автор неизвестен (супер-реакции, лимит или ошибка): "
+                         "они учтены как «получено», но не очищены от ботов и не входят в «поставлено»")
+        if ds.reaction_capped:
+            notes.append("достигнут лимит запросов: часть реакций собрана только счётчиками")
+        if ds.reaction_errors:
+            notes.append(f"ошибок при чтении авторов реакций: {ds.reaction_errors}")
+    else:
+        notes.append("режим «счётчики»: в числа входят реакции ботов и самореакции авторов, "
+                     "а кто ставил реакции — неизвестно (для этого нужен режим «полный»)")
+    if uses == 0 and total_msgs >= 100:
+        notes.append("реакций не найдено: если это неожиданно, проверьте права бота на чтение истории")
+
+    rel = make_rel(_lvl(total_msgs, 300, 2000), notes)
+    if sm and not sm.get("empty"):
+        rel = _cap(rel, LEVELS.index(sm["reliability"]["level"]))
+
+    out = {
+        "available": True, "empty": uses == 0, "full": full, "rel": rel,
+        "messages": total_msgs, "uses": uses, "msgs_with": msgs_with,
+        "msgs_share": (msgs_with / total_msgs) if total_msgs else 0.0,
+        "per_msg": (uses / total_msgs) if total_msgs else 0.0,
+        "distinct": 0, "categories": [], "table": None,
+        "top": None, "top_own": None, "top_ext": None,
+        "users_with": 0, "users_with_share": 0.0,
+        "top_received": None, "top_rate": None,
+        "givers": None, "givers_total": 0, "pairs": None,
+    }
+    if "rx_recv" in um.columns and len(um):
+        out["users_with"] = int((um["rx_recv"] > 0).sum())
+        out["users_with_share"] = out["users_with"] / len(um)
+    if uses == 0:
+        return out
+
+    g = rc.groupby("key").agg(uses=("n", "sum"), users=("uid", "nunique"))
+    eu = ds.emoji_user
+    text_uses = eu.groupby("key")["n"].sum() if len(eu) else pd.Series(dtype=float)
+    g["text_uses"] = text_uses.reindex(g.index).fillna(0).astype(int)
+    if full and len(ds.reaction_given):
+        g["givers"] = (ds.reaction_given.groupby("key")["uid"].nunique()
+                       .reindex(g.index).fillna(0).astype(int))
+    g["kind"] = ["custom" if k.startswith("c:") else "unicode" for k in g.index]
+    g["external"] = [bool(info.get(k, ("", 0, 0))[2]) for k in g.index]
+    g["share"] = g["uses"] / uses
+    g = g.sort_values(["uses", "users"], ascending=[False, False], kind="stable")
+
+    is_c = g["kind"] == "custom"
+    cats = [("Обычные (Unicode)", g[~is_c]),
+            ("Свои кастомные", g[is_c & ~g["external"]]),
+            ("Внешние кастомные (внешний)", g[is_c & g["external"]])]
+    out["categories"] = [(name, len(p), int(p["uses"].sum()), float(p["uses"].sum()) / uses)
+                         for name, p in cats]
+    out["distinct"] = len(g)
+    out["table"] = g
+    out["top"] = g.head(REACTION_TOP)
+    out["top_own"] = g[is_c & ~g["external"]].head(10)
+    out["top_ext"] = g[is_c & g["external"]].head(10)
+
+    if "rx_recv" in um.columns and len(um):
+        got = um[um["rx_recv"] > 0]
+        out["top_received"] = got.sort_values(["rx_recv", "messages"], ascending=[False, False]
+                                              ).head(REACTION_PEOPLE_TOP)
+        cand = got[got["messages"] >= REACTION_MIN_MSGS]
+        out["top_rate"] = cand.sort_values(["rx_per_msg", "messages"], ascending=[False, False]
+                                           ).head(REACTION_PEOPLE_TOP)
+
+    if full:
+        names = names_map(ds)
+        pr = ds.reaction_pairs
+        if len(ds.reaction_given):
+            gv = ds.reaction_given.groupby("uid").agg(given=("n", "sum"), distinct=("key", "nunique"))
+            gv["targets"] = (pr.groupby("src")["dst"].nunique().reindex(gv.index).fillna(0).astype(int)
+                             if len(pr) else 0)
+            gv["name"] = [names.get(u) or u for u in gv.index]
+            out["givers_total"] = len(gv)
+            out["givers"] = gv.sort_values(["given", "distinct"], ascending=[False, False],
+                                           kind="stable").head(REACTION_PEOPLE_TOP)
+        if len(pr):
+            top_pairs = pr.sort_values("n", ascending=False, kind="stable").head(REACTION_PEOPLE_TOP).copy()
+            top_pairs["src_name"] = [names.get(u) or u for u in top_pairs["src"]]
+            top_pairs["dst_name"] = [names.get(u) or u for u in top_pairs["dst"]]
+            out["pairs"] = top_pairs
+    return out

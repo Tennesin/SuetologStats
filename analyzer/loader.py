@@ -23,6 +23,8 @@ REPLY_COLS = ["src", "dst", "n"]
 EMOJI_USER_COLS = ["uid", "key", "only", "n"]
 EMOJI_INFO_COLS = ["key", "name", "animated", "external"]
 EMOJI_DAY_COLS = ["uid", "date", "n"]
+REACTION_COLS = ["uid", "key", "n"]
+REACTION_MSG_COLS = ["uid", "n"]
 
 class LoaderError(Exception):
     """Файл нельзя использовать (не тот формат, повреждён и т. п.)."""
@@ -66,6 +68,18 @@ class Dataset:
     emoji_user: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=EMOJI_USER_COLS))
     emoji_info: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=EMOJI_INFO_COLS))
     emoji_days: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=EMOJI_DAY_COLS))
+    # Реакции (схема 4)
+    has_reactions: bool = False
+    reactions_full: bool = False    # True — известно, кто ставил реакции
+    reaction_recv: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=REACTION_COLS))
+    reaction_given: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=REACTION_COLS))
+    reaction_msgs: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=REACTION_MSG_COLS))
+    reaction_pairs: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=REPLY_COLS))
+    reaction_names: dict = field(default_factory=dict)
+    reaction_self_or_bot: int = 0
+    reaction_unattributed: int = 0
+    reaction_capped: int = 0
+    reaction_errors: int = 0
 
     @property
     def total_messages(self) -> int:
@@ -264,6 +278,46 @@ def _load_emoji(wb, ds: Dataset):
     df["date"] = pd.to_datetime(df["date"])
     ds.emoji_days = df.groupby(["uid", "date"], as_index=False)["n"].sum() if len(df) else df
 
+def _load_reactions(wb, ds: Dataset):
+    """Реакции (схема 4). Нет листа data_reaction_meta — реакции не собирались, раздел скрывается."""
+    if S.SHEET_DATA_REACTION_META not in wb.sheetnames:
+        return
+    meta = {_s(r.get("key")): _to_int(r.get("value")) for r in _table(wb, S.SHEET_DATA_REACTION_META)}
+    mode = meta.get("mode", 0)
+    if mode <= 0:
+        return
+    ds.has_reactions = True
+    ds.reactions_full = mode >= 2
+    ds.reaction_self_or_bot = meta.get("self_or_bot", 0)
+    ds.reaction_unattributed = meta.get("unattributed", 0)
+    ds.reaction_capped = meta.get("capped", 0)
+    ds.reaction_errors = meta.get("errors", 0)
+
+    recv, given = [], []
+    for r in _table(wb, S.SHEET_DATA_REACTIONS):
+        u, k, n = _uid(r.get("uid")), _s(r.get("emoji")), _to_int(r.get("uses"))
+        if not (u and k and n > 0):
+            continue
+        (recv if _s(r.get("direction")) == "recv" else given).append((u, k, n))
+    if recv:
+        ds.reaction_recv = _df(recv, REACTION_COLS).groupby(["uid", "key"], as_index=False)["n"].sum()
+    if given:
+        ds.reaction_given = _df(given, REACTION_COLS).groupby(["uid", "key"], as_index=False)["n"].sum()
+
+    msgs = [(_uid(r.get("uid")), _to_int(r.get("messages"))) for r in _table(wb, S.SHEET_DATA_REACTION_MSGS)]
+    msgs = [x for x in msgs if x[0] and x[1] > 0]
+    if msgs:
+        ds.reaction_msgs = _df(msgs, REACTION_MSG_COLS).groupby("uid", as_index=False)["n"].sum()
+
+    ds.reaction_pairs = _pairs(wb, S.SHEET_DATA_REACTION_PAIRS)
+
+    names = {}
+    for r in _table(wb, S.SHEET_DATA_REACTION_USERS):
+        u = _uid(r.get("uid"))
+        if u:
+            names[u] = _s(r.get("name")) or _s(r.get("username")) or u
+    ds.reaction_names = names
+
 def load_dataset(path: Path) -> Dataset:
     try:
         wb = load_workbook(path, read_only=True, data_only=True)
@@ -276,6 +330,7 @@ def load_dataset(path: Path) -> Dataset:
         ds = _build(wb, path)
         _load_replies(wb, ds)
         _load_emoji(wb, ds)
+        _load_reactions(wb, ds)
         return ds
     finally:
         wb.close()

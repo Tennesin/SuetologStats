@@ -12,13 +12,13 @@ from dataclasses import replace
 import discord
 
 from config import (
-    DETAIL_LABELS, SORT_LABELS, STATS_DIR, build_period, collection_dir, fmt_duration, fmt_num,
-    log, safe_filename, save_local_copy, DATE_FMT,
+    DETAIL_LABELS, REACTION_LABELS, SORT_LABELS, STATS_DIR, build_period, collection_dir,
+    fmt_duration, fmt_num, log, safe_filename, save_local_copy, DATE_FMT,
 )
 from reports import build_xlsx, period_text
 from scanner import (
     ScanParams, ScanState, background_tasks, merge_results, running, scan_guild,
-    guild_start_date, params_for_guild, guild_start_date, params_for_guild,
+    guild_start_date, params_for_guild,
 )
 
 CLI_HELP = """
@@ -36,11 +36,12 @@ CLI_HELP = """
   --start дд.мм.гггг, --end дд.мм.гггг   — свои даты (вместо пресета)
   --compare          сравнить с предыдущим периодом такой же длины (читает вдвое больше)
   --exclude "чат1,чат2"   --detail days|weeks|months|auto   --sort count|name
+  --reactions counts|full|off   — реакции: счётчики (по умолчанию), полный (кто ставил, медленно), не собирать
 Во всех режимах, включая заданные вручную даты и отсутствие конца, 
 учитываются только завершённые сутки (последний день — вчера).
 """
 
-VALUE_OPTS = {"period", "last", "start", "end", "exclude", "detail", "sort"}
+VALUE_OPTS = {"period", "last", "start", "end", "exclude", "detail", "sort", "reactions"}
 FLAG_OPTS = {"compare"}
 
 _cli = {"busy": False, "cancel": False}
@@ -50,7 +51,7 @@ def parse_cli_stats(args: list[str]):
     ids: list[int] = []
     all_guilds = False
     opts = {"period": None, "last": None, "start": None, "end": None,
-            "exclude": "", "detail": "auto", "sort": "count"}
+            "exclude": "", "detail": "auto", "sort": "count", "reactions": "counts"}
     compare = False
     it = iter(args)
     for a in it:
@@ -84,12 +85,15 @@ def parse_cli_stats(args: list[str]):
         raise ValueError(f"--detail: одно из {', '.join(DETAIL_LABELS)}")
     if opts["sort"] not in SORT_LABELS:
         raise ValueError(f"--sort: одно из {', '.join(SORT_LABELS)}")
+    opts["reactions"] = str(opts["reactions"]).strip().lower()
+    if opts["reactions"] not in REACTION_LABELS:
+        raise ValueError(f"--reactions: одно из {', '.join(REACTION_LABELS)}")
 
     s, e, key, label = build_period(opts["period"], opts["start"], opts["end"], compare)
     params = ScanParams(
         start_date=s, end_date=e, user=None, channel=None,
         sort_key=opts["sort"], detail=opts["detail"], fmt="xlsx", exclude=opts["exclude"],
-        period_key=key, period_label=label, compare=compare,
+        period_key=key, period_label=label, compare=compare, reactions=opts["reactions"],
     )
     return ids, all_guilds, params
 

@@ -16,9 +16,10 @@ import discord
 
 from config import (
     ADMIN_ROLES, CONCURRENCY, DATE_FMT, EXCLUDE_FILE, GUILD_START_DATES, IGNORED_CHATS,
-    MIN_START_DATE, PROGRESS_INTERVAL, TZ, fmt_duration, fmt_list, fmt_num, log,
+    MIN_START_DATE, PROGRESS_INTERVAL, REACTION_MAX_REQUESTS, REACTION_MAX_USERS, TZ,
+    fmt_duration, fmt_list, fmt_num, log,
 )
-from emoji_utils import parse_emoji
+from emoji_utils import normalize_unicode, parse_emoji
 
 # Считаем только обычные сообщения и ответы; системные и сообщения ботов не учитываются.
 COUNTED_TYPES = {discord.MessageType.default, discord.MessageType.reply}
@@ -46,6 +47,7 @@ class ScanParams:
     period_key: str = ""       # ключ пресета ("prev-month"), если задан
     period_label: str = ""     # человекочитаемое название пресета
     compare: bool = False      # сравнить с предыдущим периодом той же длины
+    reactions: str = "counts"  # реакции: "off" / "counts" (счётчики) / "full" (с авторами реакций)
 
     @property
     def prev_range(self) -> Optional[tuple[date, date]]:
@@ -82,6 +84,16 @@ class ScanResult:
     emoji_user: dict = field(default_factory=lambda: defaultdict(int))      # (uid, ключ эмодзи, только_эмодзи 0/1) -> n
     emoji_only_day: dict = field(default_factory=lambda: defaultdict(int))  # (uid, date) -> сообщений «только эмодзи»
     emoji_info: dict = field(default_factory=dict)                          # ключ -> (имя, анимированный 0/1, внешний 0/1)
+    # Реакции под сообщениями (снимок на момент сбора)
+    reaction_mode: str = "off"                                            # "off" / "counts" / "full"
+    reaction_recv: dict = field(default_factory=lambda: defaultdict(int))   # (uid автора сообщения, ключ эмодзи) -> n
+    reaction_msgs: dict = field(default_factory=lambda: defaultdict(int))   # uid автора -> сообщений с реакциями
+    reaction_given: dict = field(default_factory=lambda: defaultdict(int))  # (кто поставил, ключ) -> n (только full)
+    reaction_pairs: dict = field(default_factory=lambda: defaultdict(int))  # (кто поставил, кому) -> n (только full)
+    reaction_self_or_bot: int = 0                                         # исключено: реакции ботов и самореакции (full)
+    reaction_unattributed: int = 0                                        # реакции без известного автора (full)
+    reaction_capped: int = 0                                              # 1, если упёрлись в лимит запросов
+    reaction_errors: int = 0                                              # ошибок чтения списка людей
     reply_unresolved: int = 0                                             # ответов, где адресат неизвестен
     reply_self_or_bot: int = 0                                            # ответы себе и ботам (не учитываются)
     names: dict = field(default_factory=dict)                             # uid -> ник
@@ -116,6 +128,10 @@ class ScanState:
         self.excluded: list[str] = []
         self.unused_rules: list[str] = []
         self.notes: list[str] = []
+        self.reaction_msgs = 0        # сообщений, под которыми есть реакции
+        self.reaction_requests = 0    # запросов «кто поставил» (страниц по 100 человек)
+        self.reaction_errors = 0
+        self.reaction_capped = False
 
     def elapsed(self) -> str:
         return fmt_duration(time.monotonic() - self.started)
@@ -126,11 +142,16 @@ class ScanState:
             return f"⏳ {head}Ищу каналы и ветки… (прошло: {self.elapsed()})"
         now = list(self.in_progress.values())
         reading = fmt_list(now, 4) if now else "—"
+        rx = ""
+        if self.reaction_msgs:
+            rx = f"\nСообщений с реакциями: {fmt_num(self.reaction_msgs)}"
+            if self.reaction_requests:
+                rx += f" • запросов «кто поставил»: {fmt_num(self.reaction_requests)}"
         return (
             f"⏳ {head}Идёт сбор. Каналов обработано: {self.channels_done}/{self.total_channels}\n"
             f"Сейчас читаю: {reading}\n"
             f"Просмотрено сообщений: {fmt_num(self.seen)} • учтено: {fmt_num(self.counted)} "
-            f"• прошло: {self.elapsed()}"
+            f"• прошло: {self.elapsed()}{rx}"
         )
 
 def period_bounds(params: ScanParams):
@@ -420,15 +441,115 @@ async def collect_staff(guild: discord.Guild, state: ScanState) -> StaffInfo:
 
 # ---------- Чтение истории ----------
 
+# ---------- Реакции ----------
+
+def reaction_key(emoji):
+    """(ключ, имя, анимированный, id кастомного). Ключи те же, что у parse_emoji:
+    "c:<id>" для кастомных, "u:<символ>" для Unicode (с той же нормализацией)."""
+    cid = getattr(emoji, "id", None)
+    if cid:
+        return (f"c:{cid}", str(getattr(emoji, "name", "") or ""),
+                bool(getattr(emoji, "animated", False)), int(cid))
+    raw = emoji if isinstance(emoji, str) else (getattr(emoji, "name", None) or str(emoji))
+    return "u:" + normalize_unicode(str(raw)), "", False, 0
+
+async def collect_reactions(m: discord.Message, uid: int, target: ScanResult, main: ScanResult,
+                            state: ScanState, params: ScanParams, own_emoji_ids):
+    """Реакции под одним сообщением (автор uid уже прошёл общие фильтры).
+    counts — берём только счётчики; full — читаем, кто поставил, и отсеиваем ботов и самореакции."""
+    full = params.reactions == "full"
+    state.reaction_msgs += 1
+    got_any = False
+
+    for reaction in m.reactions:
+        if state.cancelled:
+            break
+        count = int(reaction.count or 0)
+        if count <= 0:
+            continue
+        key, ename, animated, cid = reaction_key(reaction.emoji)
+        if key not in main.emoji_info:
+            external = int(bool(cid) and cid not in own_emoji_ids)
+            main.emoji_info[key] = (ename, int(animated), external)
+
+        fetched = 0   # сколько людей реально прочитали (включая отброшенных)
+        if full:
+            if state.reaction_requests >= REACTION_MAX_REQUESTS:
+                if not state.reaction_capped:
+                    state.reaction_capped = True
+                    state.notes.append(
+                        f"Достигнут лимит запросов «кто поставил реакцию» ({REACTION_MAX_REQUESTS}): "
+                        "дальше реакции собирались только счётчиками (без списка людей)."
+                    )
+            else:
+                try:
+                    async for user in reaction.users(limit=REACTION_MAX_USERS):
+                        fetched += 1
+                        if state.cancelled:
+                            break
+                        if user.bot or user.id == uid:
+                            target.reaction_self_or_bot += 1
+                            continue
+                        target.reaction_recv[(uid, key)] += 1
+                        target.reaction_given[(user.id, key)] += 1
+                        target.reaction_pairs[(user.id, uid)] += 1
+                        main.names.setdefault(user.id, user.display_name)
+                        main.usernames.setdefault(user.id, user.name)
+                        got_any = True
+                except discord.HTTPException as e:
+                    state.reaction_errors += 1
+                    log.warning("Не удалось прочитать авторов реакции под сообщением %s: %s", m.id, e)
+                state.reaction_requests += max(1, -(-fetched // 100))
+
+        # Всё, чьих авторов не узнали (счётчики, супер-реакции, лимит, ошибка), идёт как «получено» без фильтра.
+        rest = max(0, count - fetched)
+        if rest:
+            target.reaction_recv[(uid, key)] += rest
+            got_any = True
+            if full:
+                target.reaction_unattributed += rest
+
+    if got_any:
+        target.reaction_msgs[uid] += 1
+
+def _reaction_finish(main: ScanResult, state: ScanState, params: ScanParams):
+    """Итоговые отметки в результат и пояснения в лист «Служебное»."""
+    main.reaction_capped = int(state.reaction_capped)
+    main.reaction_errors = state.reaction_errors
+    if params.reactions == "off":
+        return
+    if params.reactions == "counts":
+        state.notes.append(
+            "Реакции собраны в режиме «счётчики»: в числа входят реакции ботов и самореакции авторов, "
+            "кто именно ставил реакции — неизвестно. Реакции — снимок на момент сбора."
+        )
+        return
+    state.notes.append(
+        "Реакции собраны в режиме «полный»: реакции ботов и самореакции исключены. "
+        "Реакции — снимок на момент сбора."
+    )
+    unattr = main.reaction_unattributed + (main.prev.reaction_unattributed if main.prev else 0)
+    if unattr:
+        state.notes.append(
+            f"У {fmt_num(unattr)} реакций автор не определён (супер-реакции, лимит или ошибка чтения): "
+            "они учтены как «получено», но не очищены от ботов и не входят в «поставлено»."
+        )
+    if state.reaction_errors:
+        state.notes.append(f"Ошибок при чтении авторов реакций: {state.reaction_errors}.")
+
+# ---------- Чтение истории ----------
+
 async def scan_channels(channels, params: ScanParams, state: ScanState,
                         own_emoji_ids=frozenset()) -> ScanResult:
     start_dt, end_dt = period_bounds(params)
     user_id = params.user.id if params.user else None
 
     main = ScanResult()
+    main.reaction_mode = params.reactions
     prev: Optional[ScanResult] = None
     if params.prev_range:
         prev = ScanResult()
+        prev.reaction_mode = params.reactions
         prev.names = main.names                    # ники и названия каналов общие
         prev.usernames = main.usernames
         prev.channel_names = main.channel_names
@@ -502,6 +623,10 @@ async def scan_channels(channels, params: ScanParams, state: ScanState,
                             if only:
                                 target.emoji_only_day[(uid, day)] += 1
 
+                    # Реакции под сообщением (счётчики сразу, авторы — отдельными запросами)
+                    if params.reactions != "off" and m.reactions:
+                        await collect_reactions(m, uid, target, main, state, params, own_emoji_ids)
+
                     main.channel_names.setdefault(ch.id, label)
                     ts = name_ts.get(uid)
                     if ts is None or m.created_at >= ts:
@@ -528,6 +653,7 @@ async def scan_channels(channels, params: ScanParams, state: ScanState,
         for t in tasks:
             t.cancel()
         raise
+    _reaction_finish(main, state, params)
     return main
 
 async def progress_loop(state: ScanState, status_msg: Optional[discord.Message]):
@@ -601,6 +727,18 @@ def _merge_into(dst: ScanResult, src: ScanResult, server: Optional[str]):
         old = dst.emoji_info.get(key)
         if old is None or (old[2] and not info[2]):
             dst.emoji_info[key] = info
+    for key, v in src.reaction_recv.items():
+        dst.reaction_recv[key] += v
+    for uid, v in src.reaction_msgs.items():
+        dst.reaction_msgs[uid] += v
+    for key, v in src.reaction_given.items():
+        dst.reaction_given[key] += v
+    for key, v in src.reaction_pairs.items():
+        dst.reaction_pairs[key] += v
+    dst.reaction_self_or_bot += src.reaction_self_or_bot
+    dst.reaction_unattributed += src.reaction_unattributed
+    dst.reaction_capped += src.reaction_capped
+    dst.reaction_errors += src.reaction_errors
     dst.reply_unresolved += src.reply_unresolved
     dst.reply_self_or_bot += src.reply_self_or_bot
     for uid, nm in src.names.items():
@@ -617,6 +755,11 @@ def merge_results(results):
     """results: список (guild, state, ScanResult). Возвращает (ScanResult, ScanState)."""
     merged = ScanResult()
     merged.merged = True       # в суммарном отчёте ники показываются без оригинального
+    modes = {r.reaction_mode for _, _, r in results}
+    if len(modes) == 1:
+        merged.reaction_mode = next(iter(modes))
+    else:                       # режимы разные: полные данные есть не у всех
+        merged.reaction_mode = "off" if "off" in modes else "counts"
     total = ScanState()
     have_prev = bool(results) and all(r.prev is not None for _, _, r in results)
     if have_prev:
@@ -638,6 +781,10 @@ def merge_results(results):
         total.seen += s.seen
         total.counted += s.counted
         total.inactive += s.inactive
+        total.reaction_msgs += s.reaction_msgs
+        total.reaction_requests += s.reaction_requests
+        total.reaction_errors += s.reaction_errors
+        total.reaction_capped = total.reaction_capped or s.reaction_capped
         total.cancelled = total.cancelled or s.cancelled
         for attr in ("skipped", "failed", "excluded", "unused_rules", "notes"):
             getattr(total, attr).extend(f"[{g.name}] {x}" for x in getattr(s, attr))

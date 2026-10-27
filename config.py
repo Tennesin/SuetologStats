@@ -84,6 +84,13 @@ FORMAT_LABELS = {
     "txt": "Текст (txt)",
     "both": "Оба файла",
 }
+REACTION_LABELS = {
+    "counts": "Счётчики (быстро, без списка людей)",
+    "full": "Полный: кто ставил (медленно)",
+    "off": "Не собирать",
+}
+REACTION_MAX_USERS = 1000        # сколько людей читать максимум у одной реакции
+REACTION_MAX_REQUESTS = 30000    # общий потолок запросов «кто ставил» на один сервер за сбор
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("statbot")

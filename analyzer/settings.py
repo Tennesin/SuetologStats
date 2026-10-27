@@ -19,6 +19,11 @@ SHEET_DATA_REPLY_META = "data_reply_meta"
 SHEET_DATA_EMOJI = "data_emoji"
 SHEET_DATA_EMOJI_INFO = "data_emoji_info"
 SHEET_DATA_EMOJI_DAYS = "data_emoji_days"
+SHEET_DATA_REACTION_META = "data_reaction_meta"
+SHEET_DATA_REACTIONS = "data_reactions"
+SHEET_DATA_REACTION_MSGS = "data_reaction_msgs"
+SHEET_DATA_REACTION_PAIRS = "data_reaction_pairs"
+SHEET_DATA_REACTION_USERS = "data_reaction_users"
 
 REQUIRED_SHEETS = [SHEET_SUMMARY, SHEET_DAILY, SHEET_INFO]
 

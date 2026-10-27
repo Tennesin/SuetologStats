@@ -11,7 +11,7 @@ import discord
 from discord import app_commands
 
 from config import (
-    ALLOWED_USER_ID, DETAIL_LABELS, FORMAT_LABELS, PERIOD_PRESETS, SORT_LABELS,
+    ALLOWED_USER_ID, DETAIL_LABELS, FORMAT_LABELS, PERIOD_PRESETS, REACTION_LABELS, SORT_LABELS,
     STATS_DIR, UPLOAD_LIMIT, build_period, collection_dir, fmt_num, log, resolve_period,
     save_local_copy, normalize_period_key,
 )
@@ -155,12 +155,14 @@ async def run_scan(guild, requester, channel, params: ScanParams, state: ScanSta
     detail="Детализация матрицы: дни/недели/месяцы (по умолчанию — авто)",
     fmt="Формат файла (по умолчанию — Excel)",
     exclude="Доп. чаты для пропуска: точные названия через запятую (опционально)",
+    reactions="Реакции: счётчики (по умолчанию), «полный» — кто ставил (долго), или не собирать",
 )
 @app_commands.rename(fmt="format")
 @app_commands.choices(
     sort=[app_commands.Choice(name=label, value=key) for key, label in SORT_LABELS.items()],
     detail=[app_commands.Choice(name=label, value=key) for key, label in DETAIL_LABELS.items()],
     fmt=[app_commands.Choice(name=label, value=key) for key, label in FORMAT_LABELS.items()],
+    reactions=[app_commands.Choice(name=label, value=key) for key, label in REACTION_LABELS.items()],
 )
 async def stats(
     interaction: discord.Interaction,
@@ -174,6 +176,7 @@ async def stats(
     detail: Optional[app_commands.Choice[str]] = None,
     fmt: Optional[app_commands.Choice[str]] = None,
     exclude: Optional[str] = None,
+    reactions: Optional[app_commands.Choice[str]] = None,
 ):
     await interaction.response.defer(ephemeral=True, thinking=True)
 
@@ -202,6 +205,7 @@ async def stats(
         fmt=fmt.value if fmt else "xlsx",
         exclude=exclude or "",
         period_key=p_key, period_label=p_label, compare=bool(compare),
+        reactions=reactions.value if reactions else "counts",
     )
 
     state = ScanState(title=guild.name)
@@ -228,8 +232,10 @@ async def stats(
             "Личные сообщения закрыты, поэтому результат придёт в этот канал "
             "(прогресс — только в консоли бота)."
         )
+        slow = ("\n⚠ Для реакций выбран режим «полный»: сбор может идти заметно дольше обычного."
+                if params.reactions == "full" else "")
         await interaction.followup.send(
-            f"Сбор запущен. Это может занять много времени. {where}\n"
+            f"Сбор запущен. Это может занять много времени. {where}{slow}\n"
             "Остановить: /cancel.",
             ephemeral=True,
         )
