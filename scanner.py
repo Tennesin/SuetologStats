@@ -16,8 +16,8 @@ import discord
 
 from config import (
     ADMIN_ROLES, CONCURRENCY, DATE_FMT, EXCLUDE_FILE, GUILD_START_DATES, IGNORED_CHATS,
-    MIN_START_DATE, PROGRESS_INTERVAL, REACTION_MAX_REQUESTS, REACTION_MAX_USERS, TZ,
-    fmt_duration, fmt_list, fmt_num, log,
+    MIN_START_DATE, PROGRESS_INTERVAL, REACTION_MAX_REQUESTS, REACTION_MAX_USERS, SPAM_FILTER, TZ,
+    fmt_duration, fmt_list, fmt_num, log, parse_date,
 )
 from emoji_utils import normalize_unicode, parse_emoji
 
@@ -132,6 +132,7 @@ class ScanState:
         self.reaction_requests = 0    # запросов «кто поставил» (страниц по 100 человек)
         self.reaction_errors = 0
         self.reaction_capped = False
+        self.spam_filtered = 0        # эмодзи и реакций, отброшенных антиспам-фильтрами
 
     def elapsed(self) -> str:
         return fmt_duration(time.monotonic() - self.started)
@@ -439,7 +440,52 @@ async def collect_staff(guild: discord.Guild, state: ScanState) -> StaffInfo:
         )
     return info
 
-# ---------- Чтение истории ----------
+# ---------- Антиспам-фильтры эмодзи ----------
+
+def build_spam_rules(guild_id: int) -> dict:
+    """SPAM_FILTER сервера -> {ключ эмодзи: [(дата, час_начала, час_конца), ...]}.
+    Ключи те же, что у parse_emoji: "c:<id>" и "u:<символ>". Битые правила пропускаются с предупреждением."""
+    rules: dict = defaultdict(list)
+    for item in SPAM_FILTER.get(guild_id, ()):
+        try:
+            emo, day_text, h1, h2 = item
+            day = parse_date(str(day_text))
+            h1, h2 = int(h1), int(h2)
+            if day is None or not (0 <= h1 < h2 <= 24):
+                raise ValueError("неверная дата или часы")
+            emo_s = str(emo).strip()
+            if not emo_s:
+                raise ValueError("пустой эмодзи")
+            key = f"c:{int(emo_s)}" if emo_s.isdigit() else "u:" + normalize_unicode(emo_s)
+        except (TypeError, ValueError) as e:
+            log.warning("SPAM_FILTER[%s]: правило %r пропущено (%s)", guild_id, item, e)
+            continue
+        rules[key].append((day, h1, h2))
+    return dict(rules)
+
+def is_spam(rules: dict, key: str, local: datetime) -> bool:
+    """Попадает ли эмодзи `key` в ручное окно по локальному времени сообщения."""
+    for day, h1, h2 in rules.get(key, ()):
+        if local.date() == day and h1 <= local.hour < h2:
+            return True
+    return False
+
+def filter_emoji(found: list, local: datetime, rules: Optional[dict], state: ScanState) -> list:
+    """Оставляет по одному эмодзи каждого типа на сообщение и убирает ручные окна.
+    Всё отброшенное идёт в state.spam_filtered."""
+    seen: set = set()
+    kept = []
+    for item in found:
+        key = item[0]
+        if key in seen:
+            state.spam_filtered += 1      # повтор того же эмодзи в этом сообщении
+            continue
+        seen.add(key)
+        if rules and is_spam(rules, key, local):
+            state.spam_filtered += 1      # ручной фильтр
+            continue
+        kept.append(item)
+    return kept
 
 # ---------- Реакции ----------
 
@@ -454,12 +500,15 @@ def reaction_key(emoji):
     return "u:" + normalize_unicode(str(raw)), "", False, 0
 
 async def collect_reactions(m: discord.Message, uid: int, target: ScanResult, main: ScanResult,
-                            state: ScanState, params: ScanParams, own_emoji_ids):
+                            state: ScanState, params: ScanParams, own_emoji_ids,
+                            spam_rules: Optional[dict] = None):
     """Реакции под одним сообщением (автор uid уже прошёл общие фильтры).
-    counts — берём только счётчики; full — читаем, кто поставил, и отсеиваем ботов и самореакции."""
+    counts — берём только счётчики; full — читаем, кто поставил, и отсеиваем ботов и самореакции.
+    Реакции из ручного антиспам-окна (по времени сообщения) пропускаются."""
     full = params.reactions == "full"
     state.reaction_msgs += 1
     got_any = False
+    local = m.created_at.astimezone(TZ)
 
     for reaction in m.reactions:
         if state.cancelled:
@@ -468,6 +517,11 @@ async def collect_reactions(m: discord.Message, uid: int, target: ScanResult, ma
         if count <= 0:
             continue
         key, ename, animated, cid = reaction_key(reaction.emoji)
+
+        if spam_rules and is_spam(spam_rules, key, local):
+            state.spam_filtered += count      # вся реакция целиком: и счётчик, и список людей
+            continue
+
         if key not in main.emoji_info:
             external = int(bool(cid) and cid not in own_emoji_ids)
             main.emoji_info[key] = (ename, int(animated), external)
@@ -540,7 +594,7 @@ def _reaction_finish(main: ScanResult, state: ScanState, params: ScanParams):
 # ---------- Чтение истории ----------
 
 async def scan_channels(channels, params: ScanParams, state: ScanState,
-                        own_emoji_ids=frozenset()) -> ScanResult:
+                        own_emoji_ids=frozenset(), spam_rules: Optional[dict] = None) -> ScanResult:
     start_dt, end_dt = period_bounds(params)
     user_id = params.user.id if params.user else None
 
@@ -614,6 +668,9 @@ async def scan_channels(channels, params: ScanParams, state: ScanState,
                         state.text_seen += 1
                         found, only = parse_emoji(m.content)
                         if found:
+                            # антиспам: один тип эмодзи — один раз на сообщение + ручные окна
+                            found = filter_emoji(found, local, spam_rules, state)
+                        if found:
                             flag = 1 if only else 0
                             for key, ename, animated, cid in found:
                                 target.emoji_user[(uid, key, flag)] += 1
@@ -625,7 +682,8 @@ async def scan_channels(channels, params: ScanParams, state: ScanState,
 
                     # Реакции под сообщением (счётчики сразу, авторы — отдельными запросами)
                     if params.reactions != "off" and m.reactions:
-                        await collect_reactions(m, uid, target, main, state, params, own_emoji_ids)
+                        await collect_reactions(m, uid, target, main, state, params,
+                                                own_emoji_ids, spam_rules)
 
                     main.channel_names.setdefault(ch.id, label)
                     ts = name_ts.get(uid)
@@ -654,6 +712,8 @@ async def scan_channels(channels, params: ScanParams, state: ScanState,
             t.cancel()
         raise
     _reaction_finish(main, state, params)
+    if state.spam_filtered:
+        state.notes.append(f"Количество эмодзи, подвергшихся фильтрации: {fmt_num(state.spam_filtered)}.")
     return main
 
 async def progress_loop(state: ScanState, status_msg: Optional[discord.Message]):
@@ -687,7 +747,10 @@ async def scan_guild(guild: discord.Guild, params: ScanParams, bot_user_id: int,
         except discord.HTTPException:
             own_emoji_ids = frozenset(e.id for e in guild.emojis)
 
-        result = await scan_channels(channels, params, state, own_emoji_ids)
+        # Ручные антиспам-окна этого сервера (SPAM_FILTER в config.py)
+        spam_rules = build_spam_rules(guild.id)
+
+        result = await scan_channels(channels, params, state, own_emoji_ids, spam_rules)
         if state.counted >= 100 and state.text_seen == 0 and not state.cancelled:
             state.notes.append(
                 "Текст сообщений недоступен (проверьте Message Content Intent): "
@@ -785,6 +848,7 @@ def merge_results(results):
         total.reaction_requests += s.reaction_requests
         total.reaction_errors += s.reaction_errors
         total.reaction_capped = total.reaction_capped or s.reaction_capped
+        total.spam_filtered += s.spam_filtered
         total.cancelled = total.cancelled or s.cancelled
         for attr in ("skipped", "failed", "excluded", "unused_rules", "notes"):
             getattr(total, attr).extend(f"[{g.name}] {x}" for x in getattr(s, attr))
