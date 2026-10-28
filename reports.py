@@ -9,8 +9,8 @@ from datetime import date, datetime, timedelta
 import xlsxwriter
 
 from config import (
-    DATE_FMT, MAX_LIST_ROWS, MAX_MATRIX_COLS, NAME_WIDTH, REACTION_LABELS, SORT_LABELS, TZ, TZ_NAME,
-    clean, fit_name, fmt_list, fmt_num,
+    AUDIT_LABELS, AUDIT_RETENTION_DAYS, DATE_FMT, MAX_LIST_ROWS, MAX_MATRIX_COLS, NAME_WIDTH,
+    REACTION_LABELS, SORT_LABELS, TZ, TZ_NAME, clean, fit_name, fmt_list, fmt_num,
 )
 from scanner import ScanParams, ScanResult, ScanState, chan_label
 
@@ -21,6 +21,16 @@ MATRIX_USERS = 30
 COMPARE_ROWS = 500
 WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 KIND_RU = {"owner": "Основатель", "admin": "Админ"}
+
+AUDIT_STATUS = {
+    "off": "журнал аудита не собирался",
+    "ok": "собран",
+    "denied": "нет доступа: боту нужно право «Просмотр журнала аудита»",
+    "failed": "сбор прервался ошибкой, данные неполные",
+    "partial": "собран не по всем серверам (подробности на листе «Служебное»)",
+}
+AUDIT_MODE_CODE = {"off": 0, "ok": 1, "denied": 2, "failed": 3, "partial": 4}
+AUDIT_UNKNOWN_ACTOR = "(автор не определён)"
 
 MODE_TITLES = {
     "days": "по дням",
@@ -661,6 +671,36 @@ def sheet_data(wb, agg: Agg, result: ScanResult):
             ((str(u), agg.names.get(u, str(u)), agg.usernames.get(u, "")) for u in sorted(rx_users)),
         )
 
+    # Журнал аудита. Нет листа data_audit_meta — аудит не собирался.
+    # mode: 1 — собран, 2 — нет доступа, 3 — ошибка (данные неполные), 4 — собран не по всем серверам.
+    if result.audit_mode != "off":
+        table(
+            "data_audit_meta",
+            ["key", "value"],
+            [("mode", AUDIT_MODE_CODE.get(result.audit_mode, 0)),
+             ("total", result.audit_total),
+             ("skipped", result.audit_skipped),
+             ("unknown_actor", result.audit_unknown_actor),
+             ("truncated", result.audit_truncated)],
+        )
+        table(
+            "data_audit_actions",
+            ["action", "count", "units"],
+            ((code, n, result.audit_units.get(code, n)) for code, n in result.audit_actions.items()),
+        )
+        table(
+            "data_audit_users",
+            ["uid", "name", "action", "count", "units"],
+            ((str(u), result.audit_names.get(u) or agg.names.get(u, str(u)), code, n,
+              result.audit_user_units.get((u, code), n))
+             for (u, code), n in result.audit_user_action.items()),
+        )
+        table(
+            "data_audit_days",
+            ["date", "count"],
+            ((d.isoformat(), n) for d, n in sorted(result.audit_day.items())),
+        )
+
     if result.user_server:
         table(
             "data_servers",
@@ -673,6 +713,131 @@ def sheet_data(wb, agg: Agg, result: ScanResult):
             ["uid", "date", "messages"],
             ((str(u), d.isoformat(), n) for (u, d), n in result.prev.user_day.items()),
         )
+
+def sheet_audit(wb, F, agg: Agg, result: ScanResult, params: ScanParams, name_w):
+    """Лист «Аудит»: сводка по журналу аудита (действия администрации)."""
+    ws = wb.add_worksheet("Аудит")
+    ws.set_column(0, 0, max(name_w, 38))
+    ws.set_column(1, 1, 34)
+    ws.set_column(2, 5, 16)
+    row = 0
+
+    def section(text, note=None):
+        nonlocal row
+        ws.merge_range(row, 0, row, 5, text, F["section"])
+        row += 1
+        if note:
+            ws.write_string(row, 0, note, F["note"])
+            row += 1
+
+    def head(titles):
+        nonlocal row
+        for c, t in enumerate(titles):
+            ws.write_string(row, c, t, F["head"])
+        row += 1
+
+    def line(label, value):
+        nonlocal row
+        ws.write_string(row, 0, label, F["bold"])
+        if isinstance(value, (int, float)):
+            ws.write_number(row, 1, value, F["int"])
+        else:
+            ws.write_string(row, 1, clean(str(value)), F["text"])
+        row += 1
+
+    def actor(uid):
+        if not uid:
+            return AUDIT_UNKNOWN_ACTOR
+        return clean(result.audit_names.get(uid) or agg.names.get(uid) or str(uid))
+
+    total = result.audit_total
+    units_total = sum(result.audit_units.values())
+
+    # 1. Сводка
+    section("1. Сводка", f"Период: {period_text(params)}. Discord хранит журнал аудита около "
+                         f"{AUDIT_RETENTION_DAYS} дней.")
+    line("Статус", AUDIT_STATUS.get(result.audit_mode, result.audit_mode))
+    line("Записей учтено", total)
+    line("Затронуто объектов (сообщений, участников и т. п.)", units_total)
+    line("Типов действий", len(result.audit_actions))
+    line("Участников совершили действия", len({u for (u, _c) in result.audit_user_action if u}))
+    if result.audit_first:
+        line("Первая запись", result.audit_first.strftime(DATE_FMT))
+    if result.audit_last:
+        line("Последняя запись", result.audit_last.strftime(DATE_FMT))
+    line("Пропущено (автомодерация и др. из AUDIT_SKIP_ACTIONS)", result.audit_skipped)
+    line("Записей без известного автора", result.audit_unknown_actor)
+    if result.audit_truncated:
+        line("⚠ Внимание", "Достигнут лимит числа записей: данные неполные.")
+    row += 1
+
+    if not total:
+        ws.write_string(row, 0, "Записей журнала аудита за выбранный период не найдено.")
+        return
+
+    # 2. По типам действий
+    section("2. По типам действий",
+            "«Объектов» — сколько всего затронуто: Discord склеивает подряд идущие удаления сообщений "
+            "в одну запись, поэтому сообщений обычно больше, чем записей.")
+    head(["Действие", "Код", "Записей", "Доля", "Объектов"])
+    by_action = sorted(result.audit_actions.items(), key=lambda it: (-it[1], it[0]))
+    for code, n in by_action:
+        ws.write_string(row, 0, AUDIT_LABELS.get(code, code), F["text"])
+        ws.write_string(row, 1, code, F["text"])
+        ws.write_number(row, 2, n, F["int"])
+        ws.write_number(row, 3, n / total, F["pct"])
+        ws.write_number(row, 4, result.audit_units.get(code, n), F["int"])
+        row += 1
+    ws.write_string(row, 0, "ВСЕГО", F["tot_text"])
+    ws.write_blank(row, 1, None, F["tot_text"])
+    ws.write_number(row, 2, total, F["tot_int"])
+    ws.write_blank(row, 3, None, F["tot_text"])
+    ws.write_number(row, 4, units_total, F["tot_int"])
+    row += 2
+
+    # 3. По дням
+    section("3. По дням", "Дни — по часовому поясу " + TZ_NAME + ". Дни без записей не показаны.")
+    head(["Дата", "Записей"])
+    for day, n in sorted(result.audit_day.items()):
+        ws.write_datetime(row, 0, day, F["date"])
+        ws.write_number(row, 1, n, F["int"])
+        row += 1
+    row += 1
+
+    # Подготовка данных по участникам
+    a_total: dict = defaultdict(int)
+    a_units: dict = defaultdict(int)
+    per_actor: dict = defaultdict(list)
+    for (uid, code), n in result.audit_user_action.items():
+        a_total[uid] += n
+        per_actor[uid].append((code, n, result.audit_user_units.get((uid, code), n)))
+    for (uid, _code), u in result.audit_user_units.items():
+        a_units[uid] += u
+    ranked = sorted(a_total, key=lambda u: (-a_total[u], actor(u).casefold(), u))
+
+    # 4. Кто сколько действий совершил
+    section("4. Кто сколько действий совершил")
+    head(["Пользователь", "ID", "Записей", "Доля", "Объектов", "Типов действий"])
+    for uid in ranked:
+        ws.write_string(row, 0, actor(uid), F["text"])
+        ws.write_string(row, 1, str(uid) if uid else "—", F["text"])
+        ws.write_number(row, 2, a_total[uid], F["int"])
+        ws.write_number(row, 3, a_total[uid] / total, F["pct"])
+        ws.write_number(row, 4, a_units[uid], F["int"])
+        ws.write_number(row, 5, len(per_actor[uid]), F["int"])
+        row += 1
+    row += 1
+
+    # 5. Кто что сделал
+    section("5. Кто что сделал", "Участники — по убыванию числа записей, внутри — по убыванию действий.")
+    head(["Пользователь", "Действие", "Записей", "Объектов"])
+    for uid in ranked:
+        for code, n, units in sorted(per_actor[uid], key=lambda it: (-it[1], it[0])):
+            ws.write_string(row, 0, actor(uid), F["text"])
+            ws.write_string(row, 1, AUDIT_LABELS.get(code, code), F["text"])
+            ws.write_number(row, 2, n, F["int"])
+            ws.write_number(row, 3, units, F["int"])
+            row += 1
 
 def sheet_info(wb, F, guild_name, params, state, matrix_note, truncated, merged=False):
     wi = wb.add_worksheet("Служебное")
@@ -754,6 +919,8 @@ def build_xlsx(guild_name: str, params: ScanParams, state: ScanState, result: Sc
     truncated = sheet_daily(wb, F, agg, name_w)
     sheet_analytics(wb, F, agg, result, params, name_w)
     sheet_staff(wb, F, agg, result, guild_name, name_w)
+    if result.audit_mode != "off":
+        sheet_audit(wb, F, agg, result, params, name_w)
     sheet_info(wb, F, guild_name, params, state, matrix_note, truncated, agg.merged)
     sheet_data(wb, agg, result)
 

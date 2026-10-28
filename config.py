@@ -92,6 +92,77 @@ REACTION_LABELS = {
 REACTION_MAX_USERS = 1000        # сколько людей читать максимум у одной реакции
 REACTION_MAX_REQUESTS = 30000    # общий потолок запросов «кто ставил» на один сервер за сбор
 
+# ---------- Журнал аудита (действия администрации) ----------
+AUDIT_ENABLED = True               # False — журнал аудита не собирается и лист «Аудит» не создаётся
+AUDIT_MAX_ENTRIES = 200_000        # предохранитель: сколько записей максимум читать на один сервер
+AUDIT_RETENTION_DAYS = 45          # сколько Discord хранит журнал (для предупреждения о неполном периоде)
+
+# Действия, которые не считаются действиями администрации (код действия, как в discord.AuditLogAction.name).
+# Автомодерация пишет в журнал нарушителя как «автора», поэтому по умолчанию отсекается.
+AUDIT_SKIP_ACTIONS = {
+    "automod_block_message",
+    "automod_flag_message",
+    "automod_timeout_member",
+}
+
+# Русские названия действий. Неизвестные коды в отчёте показываются как есть.
+AUDIT_LABELS = {
+    "guild_update": "Изменён сервер",
+    "channel_create": "Создан канал",
+    "channel_update": "Изменён канал",
+    "channel_delete": "Удалён канал",
+    "overwrite_create": "Созданы права канала",
+    "overwrite_update": "Изменены права канала",
+    "overwrite_delete": "Удалены права канала",
+    "kick": "Кик участника",
+    "member_prune": "Удаление неактивных участников",
+    "ban": "Бан участника",
+    "unban": "Разбан участника",
+    "member_update": "Изменён участник (ник, тайм-аут и т. п.)",
+    "member_role_update": "Изменены роли участника",
+    "member_move": "Перемещён в голосовой канал",
+    "member_disconnect": "Отключён от голосового канала",
+    "bot_add": "Добавлен бот",
+    "role_create": "Создана роль",
+    "role_update": "Изменена роль",
+    "role_delete": "Удалена роль",
+    "invite_create": "Создано приглашение",
+    "invite_update": "Изменено приглашение",
+    "invite_delete": "Удалено приглашение",
+    "webhook_create": "Создан вебхук",
+    "webhook_update": "Изменён вебхук",
+    "webhook_delete": "Удалён вебхук",
+    "emoji_create": "Создан эмодзи",
+    "emoji_update": "Изменён эмодзи",
+    "emoji_delete": "Удалён эмодзи",
+    "message_delete": "Удалено сообщение",
+    "message_bulk_delete": "Массовое удаление сообщений",
+    "message_pin": "Закреплено сообщение",
+    "message_unpin": "Откреплено сообщение",
+    "integration_create": "Создана интеграция",
+    "integration_update": "Изменена интеграция",
+    "integration_delete": "Удалена интеграция",
+    "stage_instance_create": "Создана трибуна",
+    "stage_instance_update": "Изменена трибуна",
+    "stage_instance_delete": "Удалена трибуна",
+    "sticker_create": "Создан стикер",
+    "sticker_update": "Изменён стикер",
+    "sticker_delete": "Удалён стикер",
+    "scheduled_event_create": "Создано событие",
+    "scheduled_event_update": "Изменено событие",
+    "scheduled_event_delete": "Удалено событие",
+    "thread_create": "Создана ветка",
+    "thread_update": "Изменена ветка",
+    "thread_delete": "Удалена ветка",
+    "app_command_permission_update": "Изменены права команд приложения",
+    "automod_rule_create": "Создано правило автомодерации",
+    "automod_rule_update": "Изменено правило автомодерации",
+    "automod_rule_delete": "Удалено правило автомодерации",
+    "soundboard_sound_create": "Создан звук саундборда",
+    "soundboard_sound_update": "Изменён звук саундборда",
+    "soundboard_sound_delete": "Удалён звук саундборда",
+}
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("statbot")
 

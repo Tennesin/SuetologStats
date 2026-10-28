@@ -15,7 +15,8 @@ from typing import Optional
 import discord
 
 from config import (
-    ADMIN_ROLES, CONCURRENCY, DATE_FMT, EXCLUDE_FILE, GUILD_START_DATES, IGNORED_CHATS,
+    ADMIN_ROLES, AUDIT_ENABLED, AUDIT_MAX_ENTRIES, AUDIT_RETENTION_DAYS, AUDIT_SKIP_ACTIONS,
+    CONCURRENCY, DATE_FMT, EXCLUDE_FILE, GUILD_START_DATES, IGNORED_CHATS,
     MIN_START_DATE, PROGRESS_INTERVAL, REACTION_MAX_REQUESTS, REACTION_MAX_USERS, SPAM_FILTER, TZ,
     fmt_duration, fmt_list, fmt_num, log, parse_date,
 )
@@ -96,6 +97,20 @@ class ScanResult:
     reaction_errors: int = 0                                              # ошибок чтения списка людей
     reply_unresolved: int = 0                                             # ответов, где адресат неизвестен
     reply_self_or_bot: int = 0                                            # ответы себе и ботам (не учитываются)
+    # Журнал аудита (действия администрации)
+    audit_mode: str = "off"                                               # "off" / "ok" / "denied" / "failed" / "partial" (в сумме)
+    audit_actions: dict = field(default_factory=lambda: defaultdict(int))      # код действия -> записей
+    audit_units: dict = field(default_factory=lambda: defaultdict(int))        # код действия -> затронуто объектов
+    audit_user_action: dict = field(default_factory=lambda: defaultdict(int))  # (uid автора, код) -> записей
+    audit_user_units: dict = field(default_factory=lambda: defaultdict(int))   # (uid автора, код) -> объектов
+    audit_day: dict = field(default_factory=lambda: defaultdict(int))          # date -> записей
+    audit_names: dict = field(default_factory=dict)                            # uid автора -> ник
+    audit_total: int = 0                                                  # учтено записей
+    audit_skipped: int = 0                                                # пропущено по AUDIT_SKIP_ACTIONS
+    audit_unknown_actor: int = 0                                          # записей без известного автора
+    audit_truncated: int = 0                                              # 1, если упёрлись в AUDIT_MAX_ENTRIES
+    audit_first: Optional[date] = None                                    # дата первой учтённой записи
+    audit_last: Optional[date] = None                                     # дата последней учтённой записи
     names: dict = field(default_factory=dict)                             # uid -> ник
     usernames: dict = field(default_factory=dict)                         # uid -> оригинальный ник
     avatars: dict = field(default_factory=dict)                           # uid -> URL аватарки
@@ -716,6 +731,120 @@ async def scan_channels(channels, params: ScanParams, state: ScanState,
         state.notes.append(f"Количество эмодзи, подвергшихся фильтрации: {fmt_num(state.spam_filtered)}.")
     return main
 
+# ---------- Журнал аудита ----------
+
+def _audit_units(entry, code: str) -> int:
+    """Сколько объектов затронула запись. Discord склеивает подряд идущие удаления сообщений
+    в одну запись с полем count, поэтому для них берём count; для остальных действий — 1."""
+    extra = getattr(entry, "extra", None)
+    if code in ("message_delete", "message_bulk_delete", "member_disconnect", "member_move"):
+        raw = getattr(extra, "count", None)
+    elif code == "member_prune":
+        raw = getattr(extra, "members_removed", None)
+    else:
+        raw = None
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return 1
+
+async def collect_audit(guild: discord.Guild, params: ScanParams,
+                        state: ScanState, result: ScanResult):
+    """Читает журнал аудита сервера за период и складывает счётчики прямо в result.
+    Никогда не бросает исключений наружу: при проблемах ставит статус в result.audit_mode
+    и пишет примечание в state.notes (оно попадёт на лист «Служебное»)."""
+    result.audit_mode = "off"
+    if not AUDIT_ENABLED:
+        return
+    if params.channel is not None:
+        state.notes.append("Журнал аудита не собирался: задан фильтр по каналу (в журнале нет привязки к каналам).")
+        return
+
+    me = guild.me
+    if me is not None and not me.guild_permissions.view_audit_log:
+        result.audit_mode = "denied"
+        state.notes.append("Журнал аудита не собран: у бота нет права «Просмотр журнала аудита».")
+        return
+
+    start_dt = (datetime.combine(params.start_date, dtime.min, tzinfo=TZ)
+                if params.start_date else None)
+    end_dt = (datetime.combine(params.end_date + timedelta(days=1), dtime.min, tzinfo=TZ)
+              if params.end_date else None)
+
+    oldest_kept = datetime.now(TZ) - timedelta(days=AUDIT_RETENTION_DAYS)
+    if start_dt is None or start_dt < oldest_kept:
+        state.notes.append(
+            f"Журнал аудита хранится Discord около {AUDIT_RETENTION_DAYS} дней: "
+            "записи за начало периода могли быть уже удалены, данные аудита неполные."
+        )
+    if params.user:
+        state.notes.append("Журнал аудита отфильтрован по автору действия (выбран пользователь).")
+
+    kwargs = {"limit": None, "oldest_first": True}
+    if start_dt:
+        kwargs["after"] = start_dt
+    if params.user:
+        kwargs["user"] = params.user
+
+    state.in_progress[-1] = "журнал аудита"
+    result.audit_mode = "ok"
+    try:
+        async for entry in guild.audit_logs(**kwargs):
+            if state.cancelled:
+                break
+            if end_dt and entry.created_at >= end_dt:
+                break
+            if result.audit_total + result.audit_skipped >= AUDIT_MAX_ENTRIES:
+                result.audit_truncated = 1
+                state.notes.append(
+                    f"Журнал аудита обрезан лимитом {fmt_num(AUDIT_MAX_ENTRIES)} записей: данные неполные."
+                )
+                break
+
+            code = getattr(entry.action, "name", None) or str(entry.action)
+            if code in AUDIT_SKIP_ACTIONS:
+                result.audit_skipped += 1
+                continue
+
+            day = entry.created_at.astimezone(TZ).date()
+            user_obj = entry.user
+            uid = int(getattr(entry, "user_id", None) or getattr(user_obj, "id", 0) or 0)
+            if uid:
+                # Боты — только по оригинальному названию (name), люди — по нику на сервере.
+                if getattr(user_obj, "bot", False):
+                    nick = getattr(user_obj, "name", None)
+                else:
+                    nick = getattr(user_obj, "display_name", None) or getattr(user_obj, "name", None)
+                if nick:
+                    result.audit_names[uid] = str(nick)
+            else:
+                result.audit_unknown_actor += 1
+
+            units = _audit_units(entry, code)
+            result.audit_total += 1
+            result.audit_actions[code] += 1
+            result.audit_units[code] += units
+            result.audit_user_action[(uid, code)] += 1
+            result.audit_user_units[(uid, code)] += units
+            result.audit_day[day] += 1
+            if result.audit_first is None or day < result.audit_first:
+                result.audit_first = day
+            if result.audit_last is None or day > result.audit_last:
+                result.audit_last = day
+    except discord.Forbidden:
+        result.audit_mode = "denied" if result.audit_total == 0 else "failed"
+        state.notes.append("Журнал аудита: Discord отказал в доступе (нужно право «Просмотр журнала аудита»).")
+    except discord.HTTPException as e:
+        result.audit_mode = "failed"
+        log.warning("[%s] Не удалось прочитать журнал аудита: %s", guild.name, e)
+        state.notes.append(f"Чтение журнала аудита прервалось ошибкой (HTTP {e.status}): данные аудита неполные.")
+    except Exception:
+        result.audit_mode = "failed"
+        log.exception("[%s] Неожиданная ошибка при чтении журнала аудита", guild.name)
+        state.notes.append("Чтение журнала аудита прервалось ошибкой (подробности в консоли бота): данные аудита неполные.")
+    finally:
+        state.in_progress.pop(-1, None)
+
 async def progress_loop(state: ScanState, status_msg: Optional[discord.Message]):
     while True:
         await asyncio.sleep(PROGRESS_INTERVAL)
@@ -756,6 +885,11 @@ async def scan_guild(guild: discord.Guild, params: ScanParams, bot_user_id: int,
                 "Текст сообщений недоступен (проверьте Message Content Intent): "
                 "данные по эмодзи пустые, это не значит, что их никто не использует."
             )
+
+        # Журнал аудита (действия администрации)
+        if not state.cancelled:
+            await collect_audit(guild, params, state, result)
+
         result.staff = staff
         return result
     finally:
@@ -804,6 +938,29 @@ def _merge_into(dst: ScanResult, src: ScanResult, server: Optional[str]):
     dst.reaction_errors += src.reaction_errors
     dst.reply_unresolved += src.reply_unresolved
     dst.reply_self_or_bot += src.reply_self_or_bot
+
+    # Журнал аудита
+    for key, v in src.audit_actions.items():
+        dst.audit_actions[key] += v
+    for key, v in src.audit_units.items():
+        dst.audit_units[key] += v
+    for key, v in src.audit_user_action.items():
+        dst.audit_user_action[key] += v
+    for key, v in src.audit_user_units.items():
+        dst.audit_user_units[key] += v
+    for key, v in src.audit_day.items():
+        dst.audit_day[key] += v
+    for uid, nm in src.audit_names.items():
+        dst.audit_names.setdefault(uid, nm)
+    dst.audit_total += src.audit_total
+    dst.audit_skipped += src.audit_skipped
+    dst.audit_unknown_actor += src.audit_unknown_actor
+    dst.audit_truncated = max(dst.audit_truncated, src.audit_truncated)
+    if src.audit_first and (dst.audit_first is None or src.audit_first < dst.audit_first):
+        dst.audit_first = src.audit_first
+    if src.audit_last and (dst.audit_last is None or src.audit_last > dst.audit_last):
+        dst.audit_last = src.audit_last
+
     for uid, nm in src.names.items():
         dst.names.setdefault(uid, nm)
     for uid, un in src.usernames.items():
@@ -852,4 +1009,17 @@ def merge_results(results):
         total.cancelled = total.cancelled or s.cancelled
         for attr in ("skipped", "failed", "excluded", "unused_rules", "notes"):
             getattr(total, attr).extend(f"[{g.name}] {x}" for x in getattr(s, attr))
+
+    # Статус аудита в сумме: «ok» только если он собран по всем серверам
+    audit_modes = {r.audit_mode for _, _, r in results}
+    if audit_modes == {"ok"}:
+        merged.audit_mode = "ok"
+    elif "ok" in audit_modes:
+        merged.audit_mode = "partial"
+    elif "failed" in audit_modes:
+        merged.audit_mode = "failed"
+    elif "denied" in audit_modes:
+        merged.audit_mode = "denied"
+    else:
+        merged.audit_mode = "off"
     return merged, total
