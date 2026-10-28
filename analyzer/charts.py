@@ -25,13 +25,11 @@ plt.rcParams.update({
 
 _NON_BMP = re.compile("[\U00010000-\U0010FFFF]")
 
-
 def _lab(text, width: int = 28) -> str:
     t = _NON_BMP.sub("", str(text)).strip() or "?"
     if len(t) > width:
         t = t[: width - 1] + "…"
     return t.replace("$", r"\$")
-
 
 def _png(fig) -> bytes:
     buf = io.BytesIO()
@@ -39,15 +37,12 @@ def _png(fig) -> bytes:
     plt.close(fig)
     return buf.getvalue()
 
-
 def b64(png: bytes) -> str:
     return base64.b64encode(png).decode("ascii")
-
 
 def _fmt_dates(ax):
     ax.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=4, maxticks=10))
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
-
 
 # ---------- Сервер ----------
 
@@ -65,7 +60,6 @@ def chart_timeline(series):
     _fmt_dates(ax)
     return _png(fig)
 
-
 def chart_dau(series):
     if series is None or series.empty:
         return None
@@ -77,7 +71,6 @@ def chart_dau(series):
     _fmt_dates(ax)
     return _png(fig)
 
-
 def chart_weekdays(avg):
     if not avg or sum(avg) == 0:
         return None
@@ -85,7 +78,6 @@ def chart_weekdays(avg):
     ax.bar(S.WEEKDAYS, avg, color=BLUE)
     ax.set_title("Среднее число сообщений по дням недели")
     return _png(fig)
-
 
 def chart_heatmap(matrix, tz: str = ""):
     if matrix is None or np.sum(matrix) == 0:
@@ -101,7 +93,6 @@ def chart_heatmap(matrix, tz: str = ""):
     ax.set_title("Активность: день недели × час")
     fig.colorbar(im, ax=ax, label="сообщений")
     return _png(fig)
-
 
 def chart_lorenz(values, gini_value=None):
     x = np.sort(np.asarray(values, dtype=float))
@@ -122,7 +113,6 @@ def chart_lorenz(values, gini_value=None):
     ax.legend(frameon=False, loc="upper left")
     return _png(fig)
 
-
 def chart_segments(seg):
     if seg is None or seg.empty:
         return None
@@ -137,7 +127,6 @@ def chart_segments(seg):
     ax.set_title("Сегменты пользователей")
     ax.legend(frameon=False)
     return _png(fig)
-
 
 def chart_channels(table, top: int = 10):
     if table is None or table.empty:
@@ -155,18 +144,17 @@ def chart_channels(table, top: int = 10):
     ax.set_title(f"Топ каналов по сообщениям (до {top})")
     return _png(fig)
 
-
-def chart_skp_top(sk, um, n: int = 15):
-    if sk is None or sk.empty:
+def chart_szp_top(sz, um, n: int = 15):
+    if sz is None or sz.empty:
         return None
-    top = sk.head(n)
-    W = S.SKP_WEIGHTS
-    colors = ["#2E7BB8", "#2E9E5B", "#E4A62E", "#9B59B6", "#E4572E", "#8A8F98"]
+    top = sz.head(n)
+    W = S.SZP_WEIGHTS
+    colors = ["#2E7BB8", "#2E9E5B", "#9B59B6", "#E4A62E", "#8A8F98"]
     fig, ax = plt.subplots(figsize=(9, 0.42 * len(top) + 1.8))
     left = np.zeros(len(top))
-    for col, k in zip(colors, "VCRIDP"):
+    for col, k in zip(colors, W):
         vals = top[k].fillna(0).values * W[k] * 100
-        ax.barh(range(len(top)), vals, left=left, color=col, label=f"{k} · {S.SKP_NAMES[k]}")
+        ax.barh(range(len(top)), vals, left=left, color=col, label=f"{k} · {S.SZP_NAMES[k]}")
         left += vals
     ax.set_yticks(range(len(top)))
     ax.set_yticklabels([_lab(um.loc[u, "name"]) for u in top.index])
@@ -174,11 +162,10 @@ def chart_skp_top(sk, um, n: int = 15):
     for i, v in enumerate(left):
         ax.text(v + 0.8, i, f"{v:.1f}", va="center", fontsize=8)
     ax.set_xlim(0, max(10.0, float(left.max()) * 1.12))
-    ax.set_xlabel("баллы СКП (вклад компонентов)")
-    ax.set_title(f"Топ-{len(top)} по СКП")
+    ax.set_xlabel("баллы СЗП (вклад компонентов)")
+    ax.set_title(f"Топ-{len(top)} по СЗП")
     ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=3, frameon=False, fontsize=8)
     return _png(fig)
-
 
 # ---------- Пользователь ----------
 
@@ -191,7 +178,6 @@ def chart_user_days(series, name: str = ""):
     ax.set_title("Сообщения по дням" + (f": {_lab(name, 40)}" if name else ""))
     _fmt_dates(ax)
     return _png(fig)
-
 
 def chart_user_hours(ds, uid: str):
     ht = ds.heat

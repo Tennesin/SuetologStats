@@ -158,25 +158,24 @@ def _trend_hint(r) -> str:
     return ""
 
 def method_html() -> str:
-    W = S.SKP_WEIGHTS
+    W = S.SZP_WEIGHTS
 
     def p(k):
         return f"{W[k] * 100:.0f}%"
 
-    return f"""<details><summary>Как считаются СКП и риск потери</summary><div class="box">
-<p><b>СКП</b> — значимость пользователя для сервера, число от 0 до 100: сумма шести компонентов (каждый от 0 до 1) с весами.</p>
+    return f"""<details><summary>Как считаются СЗП и риск потери</summary><div class="box">
+<p><b>СЗП</b> — степень значимости пользователя для сервера, число от 0 до 100: насколько изменится жизнь сервера, если этот человек пропадёт. Сумма пяти компонентов (каждый от 0 до 1) с весами.</p>
 <ul>
-<li><b>V, вклад ({p('V')})</b>: ln(1+n) / ln(1+P95), где n — сообщения человека, P95 — 95-й перцентиль по серверу. Логарифм не даёт одному спамеру задавить остальных.</li>
-<li><b>C, постоянство ({p('C')})</b>: {S.SKP_C_DAYS_W:.1f} × доля активных дней + {1 - S.SKP_C_DAYS_W:.1f} × доля активных недель.</li>
-<li><b>R, охват ({p('R')})</b>: число каналов, где у человека не меньше {S.SKP_R_MIN_MSGS} сообщений, делённое на min({S.SKP_R_CAP}, число значимых каналов). Значимый канал — не менее {S.SKP_SIG_CHANNEL * 100:.0f}% сообщений сервера.</li>
-<li><b>I, взаимодействие ({p('I')})</b>: доля ответов (reply), сглаженная к среднему по серверу, относительно потолка {S.SKP_I_CEIL}. Теги и реакции в СКП пока не входят.</li>
-<li><b>D, зависимость сервера ({p('D')})</b>: максимальная доля человека среди сообщений значимого канала; потолок — {S.SKP_D_CEIL * 100:.0f}% канала.</li>
-<li><b>P, роль ({p('P')})</b>: основатель {S.SKP_ROLE['owner']}, админ {S.SKP_ROLE['admin']}, остальные 0.</li>
+<li><b>V, объём ({p('V')})</b>: √(доля человека в сообщениях сервера ÷ доля лидера). Лидер сервера получает 1.</li>
+<li><b>C, постоянство ({p('C')})</b>: {S.SZP_C_ALL_W:.1f} × (активных дней ÷ дней от начала сервера) + {1 - S.SZP_C_ALL_W:.1f} × (активных дней из последних {S.SZP_RECENT_DAYS} ÷ {S.SZP_RECENT_DAYS}). Считается, только если с начала сервера прошло не меньше {S.SZP_MIN_DAYS} дн.</li>
+<li><b>O, отклик ({p('O')})</b>: {S.SZP_O_APPEAL_W * 100:.0f}% — входящие обращения (ответы и теги) с учётом того, сколько разных людей к нему обращалось; {(1 - S.SZP_O_APPEAL_W) * 100:.0f}% — полученные реакции. Оба показателя берутся как √(значение ÷ максимум по серверу). Если сообщений меньше {S.SZP_O_MIN_MSGS}, отклик пропорционально снижается.</li>
+<li><b>G, управление ({p('G')})</b>: {S.SZP_G_ROLE_W * 100:.0f}% — роль (основатель {S.SZP_ROLE['owner']}, админ {S.SZP_ROLE['admin']}, неформальная роль — вручную в настройках); {(1 - S.SZP_G_ROLE_W) * 100:.0f}% — реальная работа по журналу аудита: ln(1 + взвешенные действия) относительно лидера. Бан и кик весят больше, правки прав и приглашения меньше.</li>
+<li><b>B, охват ({p('B')})</b>: доля значимых каналов (не менее {S.SZP_SIG_CHANNEL * 100:.0f}% сообщений сервера), где у человека не меньше {S.SZP_B_MIN_MSGS} сообщений.</li>
 </ul>
-<p>Динамика в СКП не входит. Если часть данных недоступна (файл старого формата), вес недостающих компонентов перераспределяется на остальные.</p>
+<p>Динамика в СЗП отдельно не входит (кроме присутствия в последние дни внутри C). Если часть данных недоступна (старый формат файла, молодой сервер, нет журнала аудита), вес недостающих компонентов перераспределяется на остальные. В суммарном файле дни считаются от самой ранней даты начала серверов, роль берётся лучшая по серверам, действия аудита суммируются.</p>
 <p><b>Риск потери</b> (справочная шкала 0–100): {S.RISK_WEIGHTS['recency'] * 100:.0f}% — давность молчания относительно обычного промежутка между активными днями человека,
 {S.RISK_WEIGHTS['decline'] * 100:.0f}% — снижение темпа во второй половине окна, {S.RISK_WEIGHTS['streak'] * 100:.0f}% — прерванная серия активных дней. Показывается только для выбранных пользователей.</p>
-<p class="muted">Веса и пороги заданы экспертно и пока не проверялись на эталонных данных. СКП сравнивает людей внутри одного сервера за выбранный период; это не оценка человека и не основание для санкций. При короткой истории все выводы ориентировочные.</p>
+<p class="muted">Веса и пороги заданы экспертно и сверены только с ручной оценкой на малых серверах. Реакции собраны в режиме «счётчики», в них входят реакции ботов и самореакции. Журнал аудита Discord хранит около {S.AUDIT_RETENTION_DAYS} дней. СЗП сравнивает людей внутри одного сервера за выбранный период; это не оценка человека и не основание для санкций. При короткой истории все выводы ориентировочные.</p>
 </div></details>"""
 
 # ---------- Отчёт по серверу ----------
@@ -337,22 +336,22 @@ def build_server_html(ds, sm, um, sk, linked, emoji_html: str = "") -> str:
                        [[r.server, r.name, S.KIND_RU.get(r.kind, r.kind), r.roles or "—", int(r.n)]
                         for r in s2.itertuples()], num_cols=(4,)))
 
-    # СКП
+    # СЗП
     if len(sk):
-        b.append(h2("СКП: значимость пользователей", rel))
-        b.append('<p class="muted">В таблице — выбранные пользователи: топ по СКП и все, у кого СКП выше порога '
+        b.append(h2("СЗП: значимость пользователей", rel))
+        b.append('<p class="muted">В таблице — выбранные пользователи: топ по СЗП и все, у кого СЗП выше порога '
                  "(для них есть индивидуальные отчёты). Знак «≈» — данных о человеке мало. "
                  "Полный список — в сводном xlsx.</p>")
-        b.append(img(C.chart_skp_top(sk, um), "Топ по СКП"))
+        b.append(img(C.chart_szp_top(sk, um), "Топ по СЗП"))
         rows = []
         for uid, s in sk[sk["selected"]].iterrows():
             r = um.loc[uid]
             low = r["reliability"] == "низкая"
             risk = "—" if _bad(s["risk"]) else f"{s['risk']:.0f} ({s['risk_level']})"
-            rows.append([int(s["skp_rank"]), _link(uid, r["name"], linked),
-                         f"{s['skp']:.1f}" + (" ≈" if low else ""), s["skp_level"],
+            rows.append([int(s["szp_rank"]), _link(uid, r["name"], linked),
+                         f"{s['szp']:.1f}" + (" ≈" if low else ""), s["szp_level"],
                          int(r["messages"]), int(r["active_days"]), risk, r["reliability"], r["role"]])
-        b.append(table(["№", "Пользователь", "СКП", "Уровень", "Сообщений", "Дней", "Риск потери",
+        b.append(table(["№", "Пользователь", "СЗП", "Уровень", "Сообщений", "Дней", "Риск потери",
                         "Достоверность", "Роль"], rows, num_cols=(0, 2, 4, 5)))
         b.append(method_html())
 
@@ -360,21 +359,38 @@ def build_server_html(ds, sm, um, sk, linked, emoji_html: str = "") -> str:
 
 # ---------- Индивидуальный отчёт ----------
 
-def _explain(ds, um, uid, r, D) -> dict:
-    p95 = float(np.percentile(um["messages"], S.SKP_V_PERCENTILE))
-    ch = ds.channels
-    cnt = int(((ch["uid"] == uid) & (ch["n"] >= S.SKP_R_MIN_MSGS)).sum()) if len(ch) else None
-    m = float(um["replies"].sum()) / float(um["messages"].sum()) if um["messages"].sum() else 0.0
+def _explain(ds, s, r, D) -> dict:
+    """Короткие пояснения к компонентам СЗП для индивидуального отчёта."""
+    a = int(r["active_days"])
+    msgs = int(r["messages"])
+
+    if _bad(s["C"]):
+        c = f"не считается: с начала сервера прошло меньше {S.SZP_MIN_DAYS} дн."
+    else:
+        c = (f"активных дней {a} из {int(s['d_total'])} ({pct(a / s['d_total'])}); "
+             f"из последних {S.SZP_RECENT_DAYS} дн. активен {int(s['d_recent'])}")
+
+    if _bad(s["O"]):
+        o = "нет данных об обращениях и реакциях (файл старого формата)"
+    else:
+        o = (f"обращений к нему {int(s['appeals_in'])} от {int(s['addressers'])} чел.; "
+             f"реакций получено {int(s['rx_recv_n'])}")
+        if msgs < S.SZP_O_MIN_MSGS:
+            o += f"; сообщений меньше {S.SZP_O_MIN_MSGS}, поэтому отклик снижен"
+
+    aud = ("журнал аудита не собран" if _bad(s["g_audit"])
+           else f"действий по журналу аудита (взвешенно): {s['g_audit']:.1f}")
+    g = f"роль: {r['role'] or 'без роли администрации'} (значение {s['g_role']:.2f}); {aud}"
+
+    if _bad(s["B"]):
+        b = "нет данных по каналам (файл старого формата)"
+    else:
+        b = (f"значимых каналов, где ≥{S.SZP_B_MIN_MSGS} сообщений: "
+             f"{int(s['b_present'])} из {int(s['b_sig'])}")
+
     return {
-        "V": f"{int(r['messages'])} сообщений; потолок — 95-й перцентиль сервера ({p95:.0f})",
-        "C": f"активных дней {int(r['active_days'])} из {D} ({pct(r['active_share'])}); "
-             f"недель {int(r['weeks_active'])} ({pct(r['weeks_share'])})",
-        "R": (f"каналов, где ≥{S.SKP_R_MIN_MSGS} сообщений: {cnt}" if cnt is not None
-              else "нет данных по каналам (файл старого формата)"),
-        "I": (f"ответов {int(r['replies'])} из {int(r['messages'])} ({pct(r['reply_share'])}); "
-              f"среднее по серверу {pct(m)}" if ds.full_data else "нет данных (файл старого формата)"),
-        "D": f"доля человека среди сообщений значимого канала; максимум при ≥{S.SKP_D_CEIL * 100:.0f}% канала",
-        "P": r["role"] or "без роли администрации",
+        "V": f"{msgs} сообщений = {pct(s['v_share'])} сообщений сервера; оценка относительно лидера сервера",
+        "C": c, "O": o, "G": g, "B": b,
     }
 
 def _reply_section(ds, uid, r) -> str:
@@ -451,7 +467,7 @@ def _reply_section(ds, uid, r) -> str:
 def build_user_html(ds, uid, um, sk, days, avatar=None, emoji_html: str = "") -> str:
     r, s = um.loc[uid], sk.loc[uid]
     D = len(days)
-    W = S.SKP_WEIGHTS
+    W = S.SZP_WEIGHTS
     b = ['<p class="muted"><a href="../report.html">← к отчёту по серверу</a></p>']
     sub = [x for x in (f"@{r['username']}" if r["username"] else "", f"ID {uid}", r["role"],
                        ds.title, ds.period_text) if x]
@@ -484,7 +500,7 @@ def build_user_html(ds, uid, um, sk, days, avatar=None, emoji_html: str = "") ->
     b.append(f'<div class="box">{box}</div>')
 
     cards = [
-        card("СКП", num(s["skp"], 1), s["skp_level"]),
+        card("СЗП", num(s["szp"], 1), s["szp_level"]),
         card("Место по сообщениям", f"{int(r['rank'])} из {len(um)}"),
         card("Сообщений", num(r["messages"]), f"{pct(r['server_share'])} от всех"),
         card("Активных дней", f"{int(r['active_days'])} из {D}", pct(r["active_share"])),
@@ -498,19 +514,19 @@ def build_user_html(ds, uid, um, sk, days, avatar=None, emoji_html: str = "") ->
         cards.append(card("Ответы", pct(r["reply_share"]), f"{int(r['replies'])} шт."))
     b.append('<div class="cards">' + "".join(cards) + "</div>")
 
-    # Компоненты СКП
-    b.append(h2("Из чего сложился СКП"))
-    expl = _explain(ds, um, uid, r, D)
+    # Компоненты СЗП
+    b.append(h2("Из чего сложился СЗП"))
+    expl = _explain(ds, s, r, D)
     rows = []
-    for k in "VCRIDP":
+    for k in W:
         v = s[k]
-        rows.append([k, S.SKP_NAMES[k], "н/д" if _bad(v) else f"{v:.2f}", f"{W[k] * 100:.0f}%",
+        rows.append([k, S.SZP_NAMES[k], "н/д" if _bad(v) else f"{v:.2f}", f"{W[k] * 100:.0f}%",
                      "—" if _bad(v) else f"{W[k] * v * 100:.1f}", expl[k]])
-    rows.append(["", "Итого", "", "100%", f"{s['skp']:.1f}", ""])
+    rows.append(["", "Итого", "", "100%", f"{s['szp']:.1f}", ""])
     b.append(table(["", "Компонент", "Значение (0–1)", "Вес", "Баллы", "Пояснение"], rows, num_cols=(2, 3, 4)))
-    if s["skp_partial"]:
+    if s["szp_partial"]:
         b.append('<p class="muted">Часть компонентов недоступна, поэтому их вес перераспределён: '
-                 "сумма баллов в таблице может не совпадать с итоговым СКП.</p>")
+                 "сумма баллов в таблице может не совпадать с итоговым СЗП.</p>")
 
     # Риск потери
     if s["selected"]:

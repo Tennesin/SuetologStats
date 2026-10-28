@@ -19,7 +19,7 @@ from report_emoji import EmojiImages, build_server_emoji_html, build_user_emoji_
 from report_reactions import build_server_reactions_html, build_user_reactions_html
 from report_html import build_server_html, build_user_html
 from report_xlsx import build_summary_xlsx
-from scoring import compute_skp
+from scoring import compute_szp
 from settings import WEEKDAYS
 from avatars import fetch_avatar
 
@@ -86,7 +86,7 @@ def make_reports(ds: Dataset, out_dir: Path, args):
         um = um.join(reaction_user_metrics(ds, um))
     em = emoji_server_metrics(ds, um, sm)
     rx = reaction_server_metrics(ds, um, sm)
-    sk = compute_skp(ds, um, args.top_n, args.min_skp) if len(um) else pd.DataFrame()
+    sk = compute_szp(ds, um, args.top_n, args.min_szp) if len(um) else pd.DataFrame()
 
     used_folders = vars(args).setdefault("used_folders", set())   # общий набор на весь запуск
     imgs = vars(args).setdefault("emoji_images", EmojiImages(enabled=not args.no_avatars))
@@ -125,9 +125,9 @@ def main() -> int:
     ap.add_argument("--no-avatars", action="store_true",
                     help="не скачивать аватарки (отчёты строятся без интернета)")
     ap.add_argument("--top-n", type=int, default=S.SELECT_TOP_N,
-                    help="сколько лучших по СКП получают индивидуальный отчёт")
-    ap.add_argument("--min-skp", type=float, default=S.SELECT_MIN_SKP,
-                    help="и все, у кого СКП не ниже этого значения")
+                    help="сколько лучших по СЗП получают индивидуальный отчёт")
+    ap.add_argument("--min-szp", type=float, default=S.SELECT_MIN_SZP,
+                    help="и все, у кого СЗП не ниже этого значения")
     ap.add_argument("--max-individual", type=int, default=S.MAX_INDIVIDUAL,
                     help="предел числа индивидуальных отчётов на файл")
     args = ap.parse_args()

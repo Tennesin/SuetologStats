@@ -25,6 +25,7 @@ EMOJI_INFO_COLS = ["key", "name", "animated", "external"]
 EMOJI_DAY_COLS = ["uid", "date", "n"]
 REACTION_COLS = ["uid", "key", "n"]
 REACTION_MSG_COLS = ["uid", "n"]
+AUDIT_USER_COLS = ["uid", "name", "action", "count", "units"]
 
 class LoaderError(Exception):
     """Файл нельзя использовать (не тот формат, повреждён и т. п.)."""
@@ -80,6 +81,11 @@ class Dataset:
     reaction_unattributed: int = 0
     reaction_capped: int = 0
     reaction_errors: int = 0
+    # Журнал аудита и начало истории сервера (для СЗП)
+    has_audit: bool = False
+    audit_mode: int = 0             # 1 собран, 2 нет доступа, 3 ошибка, 4 собран не по всем серверам
+    audit_users: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=AUDIT_USER_COLS))
+    server_start: Optional[date] = None
 
     @property
     def total_messages(self) -> int:
@@ -318,6 +324,49 @@ def _load_reactions(wb, ds: Dataset):
             names[u] = _s(r.get("name")) or _s(r.get("username")) or u
     ds.reaction_names = names
 
+def _load_audit(wb, ds: Dataset):
+    """Журнал аудита (действия администрации). Нет листа data_audit_meta — аудит не собирался."""
+    if S.SHEET_DATA_AUDIT_META not in wb.sheetnames:
+        return
+    meta = {_s(r.get("key")): _to_int(r.get("value")) for r in _table(wb, S.SHEET_DATA_AUDIT_META)}
+    mode = meta.get("mode", 0)
+    ds.audit_mode = mode
+    if mode in (0, 2):                              # не собирался или нет доступа
+        return
+    rows = [(_uid(r.get("uid")), _s(r.get("name")), _s(r.get("action")),
+             _to_int(r.get("count")), _to_int(r.get("units")))
+            for r in _table(wb, S.SHEET_DATA_AUDIT_USERS)]
+    rows = [r for r in rows if r[0] and r[2] and r[3] > 0]
+    ds.audit_users = _df(rows, AUDIT_USER_COLS)
+    ds.has_audit = True
+
+    if mode == 3:
+        ds.warnings.append("Журнал аудита собран с ошибкой: показатель «Управление» (G) занижен.")
+    elif mode == 4:
+        ds.warnings.append("Журнал аудита собран не по всем серверам: показатель «Управление» (G) неполный.")
+    if meta.get("truncated"):
+        ds.warnings.append("Журнал аудита обрезан лимитом записей: показатель «Управление» (G) неполный.")
+    if ds.window_days > S.AUDIT_RETENTION_DAYS:
+        ds.warnings.append(
+            f"Окно анализа ({ds.window_days} дн.) длиннее срока хранения журнала аудита Discord "
+            f"(около {S.AUDIT_RETENTION_DAYS} дн.): показатель «Управление» (G) учитывает не весь период.")
+
+def _resolve_server_start(ds: Dataset):
+    """Начало истории сервера. У суммарного файла — начало его окна (самая ранняя дата)."""
+    gid = ds.guild_id
+    if gid is None and not ds.is_merged:            # имя файла без скобок: «Название 1234567890….xlsx»
+        m = re.search(r"(\d{15,})$", ds.path.stem)
+        if m:
+            gid = ds.guild_id = int(m.group(1))
+    if ds.is_merged:
+        ds.server_start = ds.declared_start or ds.data_start
+    else:
+        ds.server_start = S.GUILD_START_DATES.get(gid) or ds.declared_start or ds.data_start
+    if ds.server_start and ds.declared_start and ds.declared_start > ds.server_start:
+        ds.warnings.append(
+            f"Окно отчёта начинается {ds.declared_start}, а история сервера — с {ds.server_start}: "
+            "«дней из N» и постоянство считаются по окну отчёта, а не по всей истории.")
+
 def load_dataset(path: Path) -> Dataset:
     try:
         wb = load_workbook(path, read_only=True, data_only=True)
@@ -331,6 +380,8 @@ def load_dataset(path: Path) -> Dataset:
         _load_replies(wb, ds)
         _load_emoji(wb, ds)
         _load_reactions(wb, ds)
+        _resolve_server_start(ds)
+        _load_audit(wb, ds)
         return ds
     finally:
         wb.close()
