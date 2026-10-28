@@ -1,6 +1,7 @@
 """Этап 5: HTML-отчёты (один файл, картинки вшиты в base64)."""
 
 import html
+import json
 from datetime import datetime, timedelta
 from urllib.parse import quote
 
@@ -178,6 +179,167 @@ def method_html() -> str:
 <p class="muted">Веса и пороги заданы экспертно и сверены только с ручной оценкой на малых серверах. Реакции собраны в режиме «счётчики», в них входят реакции ботов и самореакции. Журнал аудита Discord хранит около {S.AUDIT_RETENTION_DAYS} дней. СЗП сравнивает людей внутри одного сервера за выбранный период; это не оценка человека и не основание для санкций. При короткой истории все выводы ориентировочные.</p>
 </div></details>"""
 
+# ---------- СЗП с переключателем «Учёт администрации» ----------
+
+_SZP_COLORS = ["#2E7BB8", "#2E9E5B", "#9B59B6", "#E4A62E", "#8A8F98"]   # как в charts.chart_szp_top
+_SZP_CHART_TOP = 15
+
+_SZP_STYLE = """<style>
+.szp-toggle{display:inline-flex;align-items:center;gap:8px;font-weight:600;cursor:pointer;
+background:var(--card);border:1px solid var(--line);border-radius:8px;padding:6px 12px;margin:6px 0}
+.szp-toggle input{width:16px;height:16px;cursor:pointer}
+.szp-legend{display:flex;flex-wrap:wrap;gap:14px;font-size:12px;color:var(--muted);margin:10px 0 6px}
+.szp-dot{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px}
+.szp-row{display:grid;grid-template-columns:210px 1fr 48px;gap:8px;align-items:center;margin:3px 0;font-size:13px}
+.szp-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.szp-track{display:flex;height:16px;background:#eef0f3;border-radius:4px;overflow:hidden}
+.szp-seg{height:100%}
+.szp-val{text-align:right;font-variant-numeric:tabular-nums}
+</style>"""
+
+def _szp_data(sk, um, linked) -> list:
+    """Данные для переключателя: баллы каждого компонента и места «с администрацией» и «без»."""
+    keys = list(S.SZP_WEIGHTS)                      # V, C, O, G, B
+    w = np.array([S.SZP_WEIGHTS[k] for k in keys], dtype=float)
+    comps = sk[keys].astype(float)
+    den = (comps.notna().values * w).sum(axis=1)    # как в scoring.compute_szp: вес недостающих уходит остальным
+    den = np.where(den > 0, den, 1.0)
+    pts = np.nan_to_num(comps.values) * w / den[:, None] * 100
+    g_pts = pts[:, keys.index("G")]
+
+    szp_on = sk["szp"].astype(float)
+    szp_off = (szp_on - g_pts).clip(lower=0)
+    rank_off = szp_off.rank(method="min", ascending=False).astype(int)
+
+    top_on = set(szp_on.sort_values(ascending=False, kind="stable").head(_SZP_CHART_TOP).index)
+    top_off = set(szp_off.sort_values(ascending=False, kind="stable").head(_SZP_CHART_TOP).index)
+
+    out = []
+    for pos, uid in enumerate(sk.index):
+        s = sk.loc[uid]
+        sel = bool(s["selected"])
+        if not (sel or uid in top_on or uid in top_off):
+            continue
+        r = um.loc[uid]
+        risk = "—" if (not sel or _bad(s["risk"])) else f"{s['risk']:.0f} ({s['risk_level']})"
+        out.append({
+            "id": str(uid), "name": str(r["name"]),
+            "href": ("users/" + quote(linked[uid])) if uid in linked else "",
+            "sel": sel,
+            "szp": round(float(szp_on[uid]), 2), "off": round(float(szp_off[uid]), 2),
+            "pts": [round(float(x), 3) for x in pts[pos]],
+            "rk": [int(s["szp_rank"]), int(rank_off[uid])],
+            "msgs": int(r["messages"]), "days": int(r["active_days"]),
+            "risk": risk, "rel": str(r["reliability"]), "role": str(r["role"] or ""),
+            "low": r["reliability"] == "низкая",
+        })
+    return out
+
+_SZP_JS = """<script>
+(function(){
+var DATA=__DATA__, CFG=__CFG__;
+var cb=document.getElementById('szp-admin');
+var bars=document.getElementById('szp-bars');
+var legend=document.getElementById('szp-legend');
+var tbody=document.getElementById('szp-body');
+var note=document.getElementById('szp-note');
+
+function el(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e;}
+function lvl(v){for(var i=0;i<CFG.levels.length;i++){if(v>=CFG.levels[i][0])return CFG.levels[i][1];}return CFG.levels[CFG.levels.length-1][1];}
+
+function render(){
+  var on=cb.checked;
+  var items=DATA.map(function(d){return {d:d,v:on?d.szp:d.off,rk:on?d.rk[0]:d.rk[1]};});
+  items.sort(function(a,b){return (a.rk-b.rk)||(b.v-a.v);});
+
+  note.textContent=on
+    ? 'Учтены все пять компонентов: V, C, O, G, B.'
+    : 'Баллы компонента G («Управление»: роль и работа по журналу аудита) сняты у всех; остальные компоненты не изменились. '
+      +'Максимум шкалы уменьшился на '+CFG.wg+' баллов.';
+
+  legend.textContent='';
+  CFG.keys.forEach(function(k,i){
+    if(!on&&i===CFG.gi)return;
+    var item=el('span');
+    var dot=el('span','szp-dot');dot.style.background=CFG.colors[i];
+    item.appendChild(dot);item.appendChild(document.createTextNode(k+' · '+CFG.names[i]));
+    legend.appendChild(item);
+  });
+
+  var top=items.slice(0,CFG.top), mx=10;
+  top.forEach(function(x){if(x.v>mx)mx=x.v;});
+  mx*=1.05;
+  bars.textContent='';
+  top.forEach(function(x){
+    var row=el('div','szp-row');
+    var nm=el('div','szp-name',x.d.name);nm.title=x.d.name;
+    var track=el('div','szp-track');
+    x.d.pts.forEach(function(p,i){
+      if(!on&&i===CFG.gi)return;
+      var seg=el('div','szp-seg');
+      seg.style.width=(p/mx*100)+'%';
+      seg.style.background=CFG.colors[i];
+      seg.title=CFG.keys[i]+' · '+CFG.names[i]+': '+p.toFixed(1);
+      track.appendChild(seg);
+    });
+    row.appendChild(nm);row.appendChild(track);row.appendChild(el('div','szp-val',x.v.toFixed(1)));
+    bars.appendChild(row);
+  });
+
+  tbody.textContent='';
+  items.forEach(function(x){
+    if(!x.d.sel)return;
+    var tr=el('tr');
+    function td(text,num){var c=el('td',num?'n':'',text);tr.appendChild(c);return c;}
+    td(String(x.rk),true);
+    var c=el('td');
+    if(x.d.href){var a=el('a','',x.d.name);a.href=x.d.href;c.appendChild(a);}else{c.textContent=x.d.name;}
+    tr.appendChild(c);
+    td(x.v.toFixed(1)+(x.d.low?' ≈':''),true);
+    td(lvl(x.v));
+    td(String(x.d.msgs),true);
+    td(String(x.d.days),true);
+    td(x.d.risk);
+    td(x.d.rel);
+    td(x.d.role);
+    tbody.appendChild(tr);
+  });
+}
+cb.addEventListener('change',render);
+render();
+})();
+</script>"""
+
+def szp_widget_html(sk, um, linked) -> str:
+    """Галочка «Учёт администрации» + полоски топа + таблица. Пересчёт происходит в браузере."""
+    keys = list(S.SZP_WEIGHTS)
+    cfg = {
+        "keys": keys, "names": [S.SZP_NAMES[k] for k in keys], "colors": _SZP_COLORS,
+        "gi": keys.index("G"), "levels": [[t, n] for t, n in S.SZP_LEVELS],
+        "top": _SZP_CHART_TOP, "wg": round(S.SZP_WEIGHTS["G"] * 100),
+    }
+
+    def dump(obj) -> str:
+        return json.dumps(obj, ensure_ascii=True).replace("</", "<\\/")
+
+    head = "".join(
+        f'<th class="n">{esc(h)}</th>' if i in (0, 2, 4, 5) else f"<th>{esc(h)}</th>"
+        for i, h in enumerate(["№", "Пользователь", "СЗП", "Уровень", "Сообщений", "Дней",
+                               "Риск потери", "Достоверность", "Роль"]))
+    js = _SZP_JS.replace("__DATA__", dump(_szp_data(sk, um, linked))).replace("__CFG__", dump(cfg))
+    return (
+        _SZP_STYLE
+        + '<label class="szp-toggle"><input type="checkbox" id="szp-admin" checked> Учёт администрации</label>'
+        + '<p class="muted" id="szp-note"></p>'
+        + '<p class="muted">В таблице — выбранные пользователи: топ по СЗП и все, у кого СЗП выше порога '
+          "(для них есть индивидуальные отчёты). Знак «≈» — данных о человеке мало. "
+          "Полный список — в сводном xlsx. Индивидуальные отчёты всегда показывают СЗП с учётом администрации.</p>"
+        + '<div class="szp-legend" id="szp-legend"></div>'
+        + '<div id="szp-bars"></div>'
+        + f'<div class="tblwrap"><table><thead><tr>{head}</tr></thead><tbody id="szp-body"></tbody></table></div>'
+        + js
+    )
+
 # ---------- Отчёт по серверу ----------
 
 def build_server_html(ds, sm, um, sk, linked, emoji_html: str = "") -> str:
@@ -339,20 +501,7 @@ def build_server_html(ds, sm, um, sk, linked, emoji_html: str = "") -> str:
     # СЗП
     if len(sk):
         b.append(h2("СЗП: значимость пользователей", rel))
-        b.append('<p class="muted">В таблице — выбранные пользователи: топ по СЗП и все, у кого СЗП выше порога '
-                 "(для них есть индивидуальные отчёты). Знак «≈» — данных о человеке мало. "
-                 "Полный список — в сводном xlsx.</p>")
-        b.append(img(C.chart_szp_top(sk, um), "Топ по СЗП"))
-        rows = []
-        for uid, s in sk[sk["selected"]].iterrows():
-            r = um.loc[uid]
-            low = r["reliability"] == "низкая"
-            risk = "—" if _bad(s["risk"]) else f"{s['risk']:.0f} ({s['risk_level']})"
-            rows.append([int(s["szp_rank"]), _link(uid, r["name"], linked),
-                         f"{s['szp']:.1f}" + (" ≈" if low else ""), s["szp_level"],
-                         int(r["messages"]), int(r["active_days"]), risk, r["reliability"], r["role"]])
-        b.append(table(["№", "Пользователь", "СЗП", "Уровень", "Сообщений", "Дней", "Риск потери",
-                        "Достоверность", "Роль"], rows, num_cols=(0, 2, 4, 5)))
+        b.append(szp_widget_html(sk, um, linked))
         b.append(method_html())
 
     return page(f"{ds.title} — анализ", "".join(b))
