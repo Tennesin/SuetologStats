@@ -100,7 +100,8 @@ def parse_cli_stats(args: list[str]):
 async def run_batch(bot: discord.Client, guilds: list[discord.Guild], params: ScanParams):
     _cli["busy"], _cli["cancel"] = True, False
     started = time.monotonic()
-    folder = collection_dir(params.start_date, params.end_date, STATS_DIR, unique=True)
+    folder = collection_dir(params.start_date, params.end_date, STATS_DIR, unique=True,
+                            full_history=params.full_history)
     results = []
     used_params = []
     try:
@@ -146,7 +147,8 @@ async def run_batch(bot: discord.Client, guilds: list[discord.Guild], params: Sc
             print("✔ Сохранено: Суммарная статистика.xlsx", flush=True)
 
         if results:
-            print(f"✅ Готово за {fmt_duration(time.monotonic() - started)}. Папка: {folder}", flush=True)
+            print(f"✅ Готово за {fmt_duration(time.monotonic() - started)}. "
+                  f"Сохранено в: {folder}", flush=True)
         else:
             print("Нечего сохранять: ни один сервер не был обработан.", flush=True)
     except Exception:

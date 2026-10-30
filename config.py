@@ -35,7 +35,10 @@ IGNORED_CHATS = {
         1555686019389464668, 1548378402279526510, 1551138756470509598, 1558791241741762560,
         1554857793821872128, 1554900297279868928, 1560031163190353960,
     },
-    1561089081264316570: set(),   # Комитет
+    1561089081264316570: {
+        1561326243394359398, 1561357040314749105, 1561356825415254097,
+        1561089404422987977, 1561103187572957224,
+    },   # Комитет
 }
 
 # Роли администрации. Ключ — ID сервера, значение — множество ролей (название строкой или ID числом).
@@ -48,6 +51,8 @@ ADMIN_ROLES = {
 TOKEN = os.environ.get("DISCORD_TOKEN")
 TZ_NAME = os.environ.get("TIMEZONE", "Asia/Tashkent").strip() or "Asia/Tashkent"
 STATS_DIR = os.environ.get("STATS_DIR")
+# Куда складываются отчёты, собранные за ВСЮ историю (без пресета и без дат). Можно переопределить через .env
+ALLDAY_DIR = os.environ.get("ALLDAY_DIR")
 ALLOWED_USER_ID = int(os.environ.get("ALLOWED_USER_ID", "0") or 0)
 CONCURRENCY = max(1, int(os.environ.get("CONCURRENCY", "4") or 4))
 EXCLUDE_FILE = os.environ.get("EXCLUDE_FILE") or os.path.join(
@@ -319,9 +324,7 @@ def resolve_period(text: str, today: Optional[date] = None):
 
 def build_period(period: Optional[str], start_text: Optional[str],
                  end_text: Optional[str], compare: bool = False):
-    """Единая точка разбора периода для /stats и терминала.
-    Возвращает (start, end, key, label). Бросает ValueError.
-    Конец периода всегда не позже вчерашнего дня: текущие сутки не завершены."""
+    """Единая точка разбора периода для /stats и терминала."""
     if period and (start_text or end_text):
         raise ValueError("Укажите либо пресет периода, либо даты начала/конца — не одновременно.")
     yday = today_local() - timedelta(days=1)
@@ -330,6 +333,8 @@ def build_period(period: Optional[str], start_text: Optional[str],
     else:
         s = e = None
         key = label = ""
+        if not start_text and not end_text:
+            key, label = "all", "вся история"
         if start_text:
             s = parse_date(start_text)
             if s is None:
@@ -369,21 +374,24 @@ def build_period(period: Optional[str], start_text: Optional[str],
 
 # ---------- Папки отчётов: год-месяц / сборник ----------
 
-def period_folder_name(start: Optional[date], end: Optional[date]) -> str:
+def period_folder_name(start: Optional[date], end: Optional[date], with_year: bool = False) -> str:
     """«26-10» для одного дня, «18-10 - 25-10» для периода."""
+    fmt = "%d-%m-%Y" if with_year else "%d-%m"
     if start and end and start != end:
-        return f"{start.strftime('%d-%m')} - {end.strftime('%d-%m')}"
+        return f"{start.strftime(fmt)} - {end.strftime(fmt)}"
     d = end or start or today_local()
-    return d.strftime("%d-%m")
+    return d.strftime(fmt)
 
 def collection_dir(start: Optional[date], end: Optional[date],
-                   base: Optional[str] = None, unique: bool = False) -> str:
-    """Путь к папке сборника: <base>/<год-месяц>/<день-месяц ...>.
-    Папка по дате конца периода. Сама папка здесь НЕ создаётся: её создаёт save_local_copy.
-    unique=True — если такая папка уже есть, добавляется « (2)», « (3)» и т. д."""
-    base = base or STATS_DIR or "output"
-    ref = end or start or today_local()
-    path = os.path.join(base, ref.strftime("%Y-%m"), period_folder_name(start, end))
+                   base: Optional[str] = None, unique: bool = False,
+                   full_history: bool = False) -> str:
+    """Путь к папке сборника."""
+    if full_history:
+        path = os.path.join(ALLDAY_DIR, period_folder_name(start, end, with_year=True))
+    else:
+        base = base or STATS_DIR or "output"
+        ref = end or start or today_local()
+        path = os.path.join(base, ref.strftime("%Y-%m"), period_folder_name(start, end))
     if unique:
         cand, i = path, 2
         while os.path.exists(cand):

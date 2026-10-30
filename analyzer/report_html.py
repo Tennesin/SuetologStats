@@ -12,7 +12,10 @@ import metrics as M
 import settings as S
 
 CSS = """
-:root{--bg:#f6f7f9;--card:#fff;--ink:#1d2430;--muted:#6b7380;--line:#e3e6eb;--accent:#1F4E78}
+:root{--bg:#f6f7f9;--card:#fff;--ink:#1d2430;--muted:#6b7380;--line:#e3e6eb;--accent:#1F4E78;
+--row-alt:#fafbfc;--warn-bg:#fff8e5;--track:#eef0f3}
+:root[data-theme="dark"]{--bg:#12161c;--card:#1b212b;--ink:#e3e7ed;--muted:#97a1af;--line:#2c3441;
+--accent:#4a8fd0;--row-alt:#202733;--warn-bg:#3a3118;--track:#2a323f;color-scheme:dark}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 -apple-system,"Segoe UI",Roboto,Arial,sans-serif}
 .wrap{max-width:1040px;margin:0 auto;padding:24px 16px 60px}
@@ -25,14 +28,15 @@ h2{margin:32px 0 10px;font-size:19px;color:var(--accent);border-bottom:2px solid
 .card .l{font-size:12px;color:var(--muted)}
 .card .h{font-size:12px;color:var(--muted)}
 .box{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:12px 0}
-.warn{border-color:#e0b252;background:#fff8e5}
+.warn{border-color:#e0b252;background:var(--warn-bg)}
 table{border-collapse:collapse;width:100%;background:var(--card);font-size:14px;margin:8px 0}
-th{background:var(--accent);color:#fff;text-align:left;padding:6px 8px;font-weight:600}
+th{background:#1F4E78;color:#fff;text-align:left;padding:6px 8px;font-weight:600}
 td{border-bottom:1px solid var(--line);padding:5px 8px;vertical-align:top}
-tr:nth-child(even) td{background:#fafbfc}
+tr:nth-child(even) td{background:var(--row-alt)}
 td.n,th.n{text-align:right}
 .tblwrap{overflow-x:auto}
 img{max-width:100%;height:auto;display:block;margin:10px auto;border:1px solid var(--line);border-radius:8px;background:#fff}
+:root[data-theme="dark"] img.chart{filter:invert(.92) hue-rotate(180deg)}
 .badge{display:inline-block;padding:1px 9px;border-radius:10px;font-size:12px;font-weight:600;color:#fff}
 .b-hi{background:#2E9E5B}.b-mid{background:#d89b1d}.b-lo{background:#c9443f}
 a{color:var(--accent)}
@@ -41,9 +45,12 @@ details{margin:14px 0}
 summary{cursor:pointer;font-weight:600}
 .head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:8px}
 .avatar{width:96px;height:96px;border-radius:50%;object-fit:cover;margin:0;flex:none;border:2px solid var(--line);background:#fff}
-.avatar.ph{display:flex;align-items:center;justify-content:center;background:var(--accent);color:#fff;font-size:42px;font-weight:700}
+.avatar.ph{display:flex;align-items:center;justify-content:center;background:#1F4E78;color:#fff;font-size:42px;font-weight:700}
 .spec{border-left:4px solid var(--accent)}
 .spec p{margin:6px 0 0}
+.theme-toggle{display:inline-flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;
+background:var(--card);border:1px solid var(--line);border-radius:8px;padding:4px 10px;margin:0 0 12px}
+.theme-toggle input{width:15px;height:15px;cursor:pointer}
 """
 
 _REL_CLASS = {"высокая": "hi", "средняя": "mid", "низкая": "lo"}
@@ -86,7 +93,7 @@ def card(label, value, hint: str = "") -> str:
 def img(png, alt: str) -> str:
     if png is None:
         return ""
-    return f'<img alt="{esc(alt)}" src="data:image/png;base64,{C.b64(png)}">'
+    return f'<img class="chart" alt="{esc(alt)}" src="data:image/png;base64,{C.b64(png)}">'
 
 def _cell(v) -> str:
     return str(v) if isinstance(v, Raw) else esc(v)
@@ -102,13 +109,29 @@ def table(headers, rows, num_cols=()) -> str:
         for r in rows)
     return f'<div class="tblwrap"><table><tr>{th}</tr>{body}</table></div>'
 
+_THEME_HEAD_JS = (
+    "<script>(function(){var t='dark';"
+    "try{t=localStorage.getItem('theme')||'dark';}catch(e){}"
+    "document.documentElement.setAttribute('data-theme',t);})();</script>"
+)
+
+_THEME_TOGGLE = (
+    '<label class="theme-toggle"><input type="checkbox" id="theme-dark"> Тёмная тема</label>'
+    "<script>(function(){var cb=document.getElementById('theme-dark');"
+    "cb.checked=document.documentElement.getAttribute('data-theme')!=='light';"
+    "cb.addEventListener('change',function(){var t=cb.checked?'dark':'light';"
+    "document.documentElement.setAttribute('data-theme',t);"
+    "try{localStorage.setItem('theme',t);}catch(e){}});})();</script>"
+)
+
 def page(title: str, body: str) -> str:
     stamp = datetime.now().strftime("%d.%m.%Y %H:%M")
     return (
-        '<!doctype html><html lang="ru"><head><meta charset="utf-8">'
+        '<!doctype html><html lang="ru" data-theme="dark"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        f"{_THEME_HEAD_JS}"
         f"<title>{esc(title)}</title><style>{CSS}</style></head><body><div class=\"wrap\">"
-        f'{body}<p class="muted">Сформировано: {stamp}</p></div></body></html>'
+        f'{_THEME_TOGGLE}{body}<p class="muted">Сформировано: {stamp}</p></div></body></html>'
     )
 
 def _link(uid, name, linked, prefix: str = "users/"):
@@ -192,7 +215,7 @@ background:var(--card);border:1px solid var(--line);border-radius:8px;padding:6p
 .szp-dot{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px}
 .szp-row{display:grid;grid-template-columns:210px 1fr 48px;gap:8px;align-items:center;margin:3px 0;font-size:13px}
 .szp-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.szp-track{display:flex;height:16px;background:#eef0f3;border-radius:4px;overflow:hidden}
+.szp-track{display:flex;height:16px;background:var(--track);border-radius:4px;overflow:hidden}
 .szp-seg{height:100%}
 .szp-val{text-align:right;font-variant-numeric:tabular-nums}
 </style>"""

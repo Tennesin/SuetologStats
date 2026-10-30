@@ -61,7 +61,9 @@ async def send_with_fallback(user, channel, content: str,
 async def deliver(guild, requester, channel, params: ScanParams, state: ScanState, result):
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     base = f"stats_{guild.id}_{stamp}"
-    folder = collection_dir(params.start_date, params.end_date, STATS_DIR)
+    folder = collection_dir(params.start_date, params.end_date, STATS_DIR,
+                            full_history=params.full_history)
+    save_locally = bool(STATS_DIR) or params.full_history
 
     files: list[tuple[str, bytes]] = []
     if params.fmt in ("xlsx", "both"):
@@ -71,7 +73,7 @@ async def deliver(guild, requester, channel, params: ScanParams, state: ScanStat
         text = await asyncio.to_thread(build_report, guild.name, params, state, result)
         files.append((base + ".txt", text.encode("utf-8")))
 
-    if STATS_DIR:
+    if save_locally:
         for name, data in files:
             await asyncio.to_thread(save_local_copy, name, data, folder)
 
@@ -112,6 +114,8 @@ async def deliver(guild, requester, channel, params: ScanParams, state: ScanStat
         f"{status} за {state.elapsed()}. Просмотрено сообщений: {fmt_num(state.seen)}, "
         f"учтено: {fmt_num(state.counted)}.{notes}"
     )
+    if save_locally or too_big:
+        content += f"\n📁 Сохранено в: `{folder}`"
     sent = await send_with_fallback(requester, channel, content, to_send)
     if sent is None:
         saved = [await asyncio.to_thread(save_local_copy, n, d, folder) for n, d in to_send]

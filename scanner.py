@@ -59,6 +59,11 @@ class ScanParams:
         prev_end = self.start_date - timedelta(days=1)
         return prev_end - timedelta(days=length - 1), prev_end
 
+    @property
+    def full_history(self) -> bool:
+        """True, если отчёт запрошен за всю историю (без пресета и без дат)."""
+        return self.period_key == "all"
+
 @dataclass
 class StaffMember:
     name: str                  # отображаемый ник
